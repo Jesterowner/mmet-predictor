@@ -1,40 +1,17 @@
 // src/store/mmetStore.js
 import { create } from "zustand";
 import { devtools, persist } from "zustand/middleware";
+import * as pdfjsLib from "pdfjs-dist";
 import { normalizeTerpName, getTop6Terpenes, roundPct } from "../utils/terpenes";
 
-/**
- * MMET Predictor v2 Zustand Store
- *
- * Key fixes integrated:
- * - parseCoaTextToProduct normalizes ALL terpene names before storing
- * - Stores COA "Total Terpenes: X.XX%" as metrics.totalTerpenes (separate from terp array)
- * - Parses all terpene lines it can find (bullets + inline "Name (X%)" patterns)
- *
- * State (required):
- * - products[]
- * - sessionLog[]
- * - profileName
- * - scoreMode
- * - scoreSource
- *
- * Actions (required):
- * - importLog()
- * - exportLog()
- * - parseCoaText()
- * - handleCoaFiles()
- * - clearProducts()
- * - logActuals()
- * - saveSession()
- */
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url
+).toString();
 
-// ---------- small utilities ----------
 const uuid = () => {
-  try {
-    return crypto.randomUUID();
-  } catch {
-    return `id_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  }
+  try { return crypto.randomUUID(); }
+  catch { return `id_${Date.now()}_${Math.random().toString(16).slice(2)}`; }
 };
 
 const toNumber = (v) => {
@@ -50,154 +27,138 @@ function firstNonEmptyLine(text) {
     .find((l) => l.length > 0) || "Unknown Product";
 }
 
-function extractLabeledValue(text, labelRegex) {
-  const m = String(text || "").match(labelRegex);
-  if (!m) return null;
-  return m[1]?.trim() ?? null;
+function extractProductName(text) {
+  const t = String(text || "");
+  let m = t.match(/(HAZE[\sA-Z0-9#-]+\([IHS]\)[^\n]{0,80}\b\d+(?:\.\d+)?\s*g\b)/i);
+  if (m) return m[1].trim();
+  m = t.match(/Product\s*Name:\s*([^\n]+)/i);
+  if (m) return m[1].trim();
+  return firstNonEmptyLine(t);
 }
 
-/**
- * Parse terpene pairs from a COA text.
- *
- * Supports:
- * - Bullet lines: "- beta-Caryophyllene 2.14%"
- * - Inline parenthetical: "D-Limonene (1.44%); β-Caryophyllene (1.24%)"
- * - Inline bare: "Linalool 0.70%"
- *
- * Excludes obvious metric lines (THC/cannabinoids/total terpenes).
- */
-function extractTerpenePairs(coaText) {
-  const text = String(coaText || "");
-  const lines = text.split(/\r?\n/);
+function extractForm(text) {
+  const t = String(text || "");
+  let m = t.match(/Form:\s*([^\n]+)/i);
+  if (m) return m[1].trim();
 
-  const out = [];
+  const formTypes = [
+    "Live Badder","Live Rosin","Live Sugar","Live Resin","Live Sauce",
+    "Diamonds","Flower","Cart","Vape","Wax","Jam","Extract"
+  ];
+  for (const ft of formTypes) if (new RegExp(ft, "i").test(t)) return ft;
+  return null;
+}
 
-  const shouldSkipLine = (l) => {
-    const s = l.toLowerCase();
-    return (
-      s.includes("total thc") ||
-      s.includes("thc per unit") ||
-      s.includes("total cannabinoids") ||
-      s.includes("total terpenes") ||
-      s.startsWith("form:")
-    );
+function extractTotalTHC(text) {
+  const t = String(text || "");
+
+  let m = t.match(/Total\s*THC[\s\S]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  if (m) return toNumber(m[1]);
+
+  m = t.match(/Total\s*THC[\s\S]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*mg\s*\/\s*g/i);
+  if (m) {
+    const mgPerG = toNumber(m[1]);
+    if (mgPerG != null) return roundPct(mgPerG / 10);
+  }
+
+  const mUnit = t.match(/Total\s*THC\s*\/\s*Unit\s*([0-9]+(?:\.[0-9]+)?)\s*mg/i);
+  const mGUnit = t.match(/Product\s*g\s*\/\s*unit\s*:?\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if (mUnit) {
+    const thcMg = toNumber(mUnit[1]);
+    const gUnit = mGUnit ? toNumber(mGUnit[1]) : 1.0;
+    if (thcMg != null && gUnit != null && gUnit > 0) return roundPct((thcMg / gUnit) / 10);
+  }
+
+  return null;
+}
+
+function extractTotalTerpenes(text) {
+  const t = String(text || "");
+  let m = t.match(/Total\s*Terpenes[\s:]+([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  if (m) return toNumber(m[1]);
+  m = t.match(/Total[\s\n]*Terpenes[\s\n]*([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  if (m) return toNumber(m[1]);
+  return null;
+}
+
+function extractTerpenePairs(text) {
+  const t = String(text || "");
+  const pairs = [];
+  const seen = new Set();
+
+  const add = (name, pct) => {
+    const key = String(name || "").trim().toLowerCase();
+    if (!key) return;
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 50) return;
+    if (seen.has(key)) return;
+    pairs.push({ name: String(name).trim(), pct });
+    seen.add(key);
   };
 
-  // One-per-line pattern: "- Name 0.123%" or "Name 0.123%"
-  const lineRegex =
-    /(?:^|[-•]\s*)([A-Za-z0-9+./()' \-βααββ]+?)\s+(\d+(\.\d+)?)\s*%/i;
+  const up = t.toUpperCase();
+  const sIdx = up.indexOf("TERPENES SUMMARY");
+  if (sIdx >= 0) {
+    const tail = t.slice(sIdx);
+    const stop = tail.match(/(Total\s+Terpenes\s*:|Showing\s+top|POTENCY\s+SUMMARY|MYCOTOXINS|MICROBIALS|PESTICIDES|RESIDUAL\s+SOLVENTS|HEAVY\s+METALS|Order\s*#|Certificate\s+of\s+Analysis)/i);
+    const block = stop ? tail.slice(0, stop.index) : tail;
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-    if (shouldSkipLine(line)) continue;
-
-    // Multi-terp inline pattern: "Name (1.23%)"
-    const parenGlobal =
-      /([A-Za-z0-9+./' \-βααββ]+?)\s*\(\s*(\d+(\.\d+)?)\s*%\s*\)/gi;
-
-    let pm;
-    let foundParen = false;
-    while ((pm = parenGlobal.exec(line)) !== null) {
-      foundParen = true;
-      out.push({ name: pm[1].trim(), pct: Number(pm[2]) });
-    }
-    if (foundParen) continue;
-
-    const m = line.match(lineRegex);
-    if (m) {
-      out.push({ name: m[1].trim(), pct: Number(m[2]) });
+    const re = /([A-Za-z][A-Za-z\-]*(?:\s+[A-Za-z][A-Za-z\-]*)*)\s+([0-9]+\.[0-9]+)\s+([0-9]{2,6})/g;
+    for (const m of block.matchAll(re)) {
+      const name = m[1].trim();
+      if (/Analyte|Result|ug\/g|SUMMARY/i.test(name)) continue;
+      const pct = toNumber(m[2]);
+      if (pct != null) add(name, pct);
     }
   }
 
-  return out;
+  for (const m of t.matchAll(/([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+(?:\.[0-9]+)?)\s*%/g)) {
+    const name = m[1].trim();
+    if (/Total\s+Terpenes/i.test(name)) continue;
+    const pct = toNumber(m[2]);
+    if (pct != null) add(name, pct);
+  }
+
+  return pairs;
 }
 
-/**
- * Normalize and combine duplicate terpenes.
- * Stores full terpene array with normalized names.
- */
 function normalizeAndCombineTerps(pairs) {
   const map = new Map();
-  for (const t of pairs) {
-    const name = normalizeTerpName(t.name);
-    const pct = Number(t.pct);
+  for (const tt of pairs || []) {
+    const name = normalizeTerpName(tt.name);
+    const pct = Number(tt.pct);
     if (!name) continue;
     if (!Number.isFinite(pct) || pct <= 0) continue;
     map.set(name, (map.get(name) || 0) + pct);
   }
-
   return Array.from(map.entries())
     .map(([name, pct]) => ({ name, pct: roundPct(pct) }))
     .sort((a, b) => b.pct - a.pct);
 }
 
-/**
- * Parse a COA text block into a product object in the required format.
- * - Normalized terpenes
- * - COA Total Terpenes stored in metrics.totalTerpenes (separate from terp array)
- */
 function parseCoaTextToProduct(coaText, meta = {}) {
   const text = String(coaText || "").trim();
   if (!text) return null;
 
-  const nameLine = firstNonEmptyLine(text);
+  const name = extractProductName(text);
+  const form = extractForm(text);
+  const totalTHC = extractTotalTHC(text);
+  const totalTerpenes = extractTotalTerpenes(text);
 
-  const form =
-    extractLabeledValue(text, /(?:^|\n)\s*form:\s*(.+?)\s*(?:\n|$)/i) || null;
+  if (totalTHC == null) return null;
 
-  const totalTHC = toNumber(
-    extractLabeledValue(
-      text,
-      /(?:^|\n)\s*total thc:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
-    )
-  );
-
-  // ✅ COA Total Terpenes (separate from terp array; do not sum terps for this)
-  const totalTerpenes = toNumber(
-    extractLabeledValue(
-      text,
-      /(?:^|\n)\s*total terpenes:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
-    )
-  );
-
-  const totalCannabinoids = toNumber(
-    extractLabeledValue(
-      text,
-      /(?:^|\n)\s*total cannabinoids:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
-    )
-  );
-
-  const thcPerUnitMg = toNumber(
-    extractLabeledValue(
-      text,
-      /(?:^|\n)\s*thc per unit:\s*([0-9.]+)\s*mg\s*(?:\n|$)/i
-    )
-  );
-
-  // ✅ Parse all terpene lines then normalize names before storing
   const rawPairs = extractTerpenePairs(text);
-  const normalizedTerpenes = normalizeAndCombineTerps(rawPairs);
-
-  // Useful derived field (top 6 normalized/combined) for display/scoring elsewhere
-  const top6 = getTop6Terpenes(normalizedTerpenes);
+  const terpenes = normalizeAndCombineTerps(rawPairs);
+  const top6 = getTop6Terpenes(terpenes);
 
   return {
     id: uuid(),
-    name: nameLine,
+    name,
     form,
-    metrics: {
-      totalTHC,
-      totalTerpenes, // ✅ COA value
-      totalCannabinoids,
-      thcPerUnitMg,
-    },
-    // ✅ Full terp array, already normalized + combined
-    terpenes: normalizedTerpenes,
-    // Optional convenience
+    metrics: { totalTHC, totalTerpenes },
+    terpenes,
     top6,
     coa: {
-      rawText: text,
+      rawText: text.length > 5000 ? text.slice(0, 5000) + "..." : text,
       sourceFileName: meta.sourceFileName || null,
       parsedAt: new Date().toISOString(),
     },
@@ -205,80 +166,52 @@ function parseCoaTextToProduct(coaText, meta = {}) {
   };
 }
 
-// ---------- file reading (txt + optional pdf) ----------
 async function readFileAsText(file) {
   const name = (file?.name || "").toLowerCase();
 
-  // Plain text
-  if (
-    name.endsWith(".txt") ||
-    name.endsWith(".csv") ||
-    name.endsWith(".md") ||
-    file?.type?.startsWith("text/")
-  ) {
+  if (name.endsWith(".txt") || name.endsWith(".csv") || file?.type?.startsWith("text/")) {
     return await file.text();
   }
 
-  // Optional PDF support (only if pdfjs-dist is installed & worker configured)
   if (name.endsWith(".pdf") || file?.type === "application/pdf") {
-    try {
-      const pdfjsLib = await import("pdfjs-dist");
+    const data = new Uint8Array(await file.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
 
-      // NOTE: In Vite, configure workerSrc once in app init if needed:
-      // pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      //   "pdfjs-dist/build/pdf.worker.min.mjs",
-      //   import.meta.url
-      // ).toString();
-
-      const data = new Uint8Array(await file.arrayBuffer());
-      const pdf = await pdfjsLib.getDocument({ data }).promise;
-
-      let out = "";
-      for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        out += content.items.map((it) => it.str).join(" ") + "\n";
-      }
-      return out.trim();
-    } catch {
-      throw new Error(
-        "PDF upload requires pdfjs-dist and worker configuration. Install it or convert PDFs to text first."
-      );
+    let out = "";
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const items = content.items.map((it) => it.str);
+      out += items.join(" ") + "\n\n";
     }
+    return out.trim();
   }
 
   throw new Error(`Unsupported file type: ${file?.name || "unknown"}`);
 }
 
-// ---------- store ----------
 export const useMmetStore = create(
   devtools(
     persist(
       (set, get) => ({
-        // ---- state ----
         products: [],
         sessionLog: [],
         profileName: "Default",
-        scoreMode: "standard",
-        scoreSource: "coa",
         lastError: null,
-        lastParseAt: null,
 
-        // ---- actions ----
+        // debug
+        lastFileName: null,
+        lastFileTextPreview: null,
+        lastTerpeneProbe: null,
+
         clearProducts: () => set({ products: [], lastError: null }),
 
         parseCoaText: (coaText, meta = {}) => {
           try {
             const product = parseCoaTextToProduct(coaText, meta);
             if (!product) return null;
-
-            set((state) => ({
-              products: [product, ...state.products],
-              lastError: null,
-              lastParseAt: new Date().toISOString(),
-            }));
-
-            return product;
+            set((state) => ({ products: [product, ...state.products], lastError: null }));
+            return [product];
           } catch (e) {
             set({ lastError: e?.message || "Failed to parse COA text" });
             return null;
@@ -295,13 +228,21 @@ export const useMmetStore = create(
           for (const f of fileArr) {
             try {
               const text = await readFileAsText(f);
-              const p = get().parseCoaText(text, { sourceFileName: f.name });
-              if (p) added += 1;
-            } catch (e) {
-              errors.push({
-                file: f?.name || "unknown",
-                error: e?.message || String(e),
+
+              const upper = String(text || "").toUpperCase();
+              const idx = upper.indexOf("TERPEN");
+              const probe = idx >= 0 ? String(text || "").slice(Math.max(0, idx - 200), idx + 1200) : null;
+
+              set({
+                lastFileName: f.name,
+                lastFileTextPreview: String(text || "").slice(0, 4000),
+                lastTerpeneProbe: probe,
               });
+
+              const result = get().parseCoaText(text, { sourceFileName: f.name });
+              if (result) added += Array.isArray(result) ? result.length : 1;
+            } catch (e) {
+              errors.push({ file: f?.name || "unknown", error: e?.message || String(e) });
             }
           }
 
@@ -309,66 +250,24 @@ export const useMmetStore = create(
           return { added, errors };
         },
 
-        exportLog: () => {
-          const state = get();
-          const payload = {
-            app: "MMET Predictor",
-            version: 2,
-            exportedAt: new Date().toISOString(),
-            profileName: state.profileName,
-            scoreMode: state.scoreMode,
-            scoreSource: state.scoreSource,
-            sessionLog: state.sessionLog,
-          };
-          return JSON.stringify(payload, null, 2);
-        },
+        applyTerpenePaste: ({ productId, terpText } = {}) => {
+          if (!productId) { set({ lastError: "applyTerpenePaste requires productId" }); return false; }
+          const raw = String(terpText || "").trim();
+          if (!raw) { set({ lastError: "No terp text provided" }); return false; }
 
-        importLog: (input) => {
-          try {
-            const data =
-              typeof input === "string" ? JSON.parse(input) : input || {};
-            const nextSessionLog = Array.isArray(data.sessionLog)
-              ? data.sessionLog
-              : [];
-
-            set((state) => ({
-              profileName: data.profileName ?? state.profileName,
-              scoreMode: data.scoreMode ?? state.scoreMode,
-              scoreSource: data.scoreSource ?? state.scoreSource,
-              sessionLog: nextSessionLog,
-              lastError: null,
-            }));
-
-            return { ok: true, sessions: nextSessionLog.length };
-          } catch (e) {
-            set({ lastError: e?.message || "Import failed" });
-            return { ok: false, error: e?.message || "Import failed" };
-          }
-        },
-
-        logActuals: ({ sessionId, productId, actuals, notes } = {}) => {
-          if (!sessionId || !productId) {
-            set({ lastError: "logActuals requires sessionId and productId" });
-            return false;
-          }
-
-          const entry = {
-            id: uuid(),
-            at: new Date().toISOString(),
-            productId,
-            actuals: actuals || {},
-            notes: notes || "",
-          };
+          const rawPairs = extractTerpenePairs(raw);
+          const terpenes = normalizeAndCombineTerps(rawPairs);
+          const top6 = getTop6Terpenes(terpenes);
 
           set((state) => ({
-            sessionLog: state.sessionLog.map((s) => {
-              if (s.sessionId !== sessionId) return s;
-              return {
-                ...s,
-                actuals: Array.isArray(s.actuals)
-                  ? [...s.actuals, entry]
-                  : [entry],
-              };
+            products: state.products.map((p) => {
+              if (p.id !== productId) return p;
+              const metrics = { ...(p.metrics || {}) };
+              if (!metrics.totalTerpenes || metrics.totalTerpenes === 0) {
+                const sum = terpenes.reduce((a, t) => a + (Number(t.pct) || 0), 0);
+                metrics.totalTerpenes = roundPct(sum);
+              }
+              return { ...p, metrics, terpenes, top6 };
             }),
             lastError: null,
           }));
@@ -376,53 +275,50 @@ export const useMmetStore = create(
           return true;
         },
 
-        saveSession: ({ label, productId } = {}) => {
-          const state = get();
-          
-          const product = productId
-            ? state.products.find(p => p.id === productId)
-            : state.products[0];
-
-          if (!product) {
-            set({ lastError: "No product available to save session" });
-            return null;
-          }
-
-          const session = {
-            sessionId: uuid(),
-            createdAt: new Date().toISOString(),
-            label: label || `${product.name} - ${new Date().toLocaleDateString()}`,
-            profileName: state.profileName,
-            scoreMode: state.scoreMode,
-            scoreSource: state.scoreSource,
-            
-            product: {
-              id: product.id,
-              name: product.name,
-              form: product.form,
-              metrics: {
-                totalTHC: product.metrics?.totalTHC,
-                totalTerpenes: product.metrics?.totalTerpenes,
-                totalCannabinoids: product.metrics?.totalCannabinoids,
-                thcPerUnitMg: product.metrics?.thcPerUnitMg,
-              },
-              top6: product.top6?.map(t => ({
-                name: t.name,
-                pct: t.pct,
-                band: t.band || null,
-              })) || [],
-            },
-            
-            productsSnapshot: [product],
-            actuals: [],
+        // After-use rating log (this is your calibration loop)
+        addSessionEntry: ({ productId, actuals, notes } = {}) => {
+          if (!productId) { set({ lastError: "addSessionEntry requires productId" }); return false; }
+          const entry = {
+            id: uuid(),
+            at: new Date().toISOString(),
+            productId,
+            actuals: actuals || {},
+            notes: notes || "",
           };
+          set((state) => ({ sessionLog: [entry, ...state.sessionLog], lastError: null }));
+          return true;
+        },
 
-          set((s) => ({
-            sessionLog: [session, ...s.sessionLog],
-            lastError: null,
-          }));
+        // Profile export/import (upload before each use)
+        exportProfileJson: () => {
+          const s = get();
+          const payload = {
+            app: "MMET Predictor",
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            profileName: s.profileName,
+            products: s.products,
+            sessionLog: s.sessionLog,
+          };
+          return JSON.stringify(payload, null, 2);
+        },
 
-          return session.sessionId;
+        importProfileJson: (input) => {
+          try {
+            const data = typeof input === "string" ? JSON.parse(input) : input || {};
+            const products = Array.isArray(data.products) ? data.products : [];
+            const sessionLog = Array.isArray(data.sessionLog) ? data.sessionLog : [];
+            set((s) => ({
+              profileName: data.profileName ?? s.profileName,
+              products,
+              sessionLog,
+              lastError: null,
+            }));
+            return { ok: true, products: products.length, sessions: sessionLog.length };
+          } catch (e) {
+            set({ lastError: e?.message || "Import failed" });
+            return { ok: false, error: e?.message || "Import failed" };
+          }
         },
       }),
       {
@@ -432,8 +328,6 @@ export const useMmetStore = create(
           products: s.products,
           sessionLog: s.sessionLog,
           profileName: s.profileName,
-          scoreMode: s.scoreMode,
-          scoreSource: s.scoreSource,
         }),
       }
     ),
