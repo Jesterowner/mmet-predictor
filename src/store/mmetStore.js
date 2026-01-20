@@ -1,405 +1,442 @@
 // src/store/mmetStore.js
 import { create } from "zustand";
-import { normalizeTerpName, getTop6Terpenes } from "../utils/terpenes";
+import { devtools, persist } from "zustand/middleware";
+import { normalizeTerpName, getTop6Terpenes, roundPct } from "../utils/terpenes";
 
 /**
- * MMET Predictor v2 – Zustand Store
+ * MMET Predictor v2 Zustand Store
  *
- * State:
- * - products[]: parsed COA products
- * - sessionLog[]: user calibration sessions (actuals)
- * - profileName: current user/profile
- * - scoreMode: "raw" | "calibrated" (future-ready)
- * - scoreSource: "coa" | "coa+log" (future-ready)
- * - lastError: last UI-visible error
+ * Key fixes integrated:
+ * - parseCoaTextToProduct normalizes ALL terpene names before storing
+ * - Stores COA "Total Terpenes: X.XX%" as metrics.totalTerpenes (separate from terp array)
+ * - Parses all terpene lines it can find (bullets + inline "Name (X%)" patterns)
  *
- * Actions:
- * - importLog(payload)
+ * State (required):
+ * - products[]
+ * - sessionLog[]
+ * - profileName
+ * - scoreMode
+ * - scoreSource
+ *
+ * Actions (required):
+ * - importLog()
  * - exportLog()
- * - parseCoaText(text, meta?)
- * - handleCoaFiles(fileList)
+ * - parseCoaText()
+ * - handleCoaFiles()
  * - clearProducts()
- * - logActuals(session)
- * - saveSession(session)
+ * - logActuals()
+ * - saveSession()
  */
 
-// ------------------------------
-// Helpers
-// ------------------------------
-function safeNumber(n) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : null;
-}
-
-function makeId(prefix = "p") {
-  // Use browser crypto if available (Vercel/modern browsers)
-  if (typeof crypto !== "undefined" && crypto.randomUUID) {
-    return `${prefix}_${crypto.randomUUID()}`;
+// ---------- small utilities ----------
+const uuid = () => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `id_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   }
-  // Fallback
-  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+};
+
+const toNumber = (v) => {
+  if (v == null) return null;
+  const n = Number(String(v).replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+
+function firstNonEmptyLine(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find((l) => l.length > 0) || "Unknown Product";
+}
+
+function extractLabeledValue(text, labelRegex) {
+  const m = String(text || "").match(labelRegex);
+  if (!m) return null;
+  return m[1]?.trim() ?? null;
 }
 
 /**
- * Try to extract a single numeric percent from a line like:
- * "Total Terpenes: 5.86%" or "Total THC: 74.8%"
- */
-function extractPercentAfterLabel(text, label) {
-  const re = new RegExp(`${label}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)\\s*%`, "i");
-  const m = text.match(re);
-  return m ? safeNumber(m[1]) : null;
-}
-
-/**
- * COA terpene line parsing:
- * Supports common formats:
- * - "- beta-Caryophyllene 2.26%"
- * - "β-Caryophyllene (0.75%)"
- * - "Primary: D-Limonene (1.44%); β-Caryophyllene (1.24%)"
- * - "Supporting: Pinene (α+β ≈ 0.37%)"  -> extracts 0.37 for "pinene"
+ * Parse terpene pairs from a COA text.
  *
- * Returns array of { name, pct } in raw (not normalized) form.
+ * Supports:
+ * - Bullet lines: "- beta-Caryophyllene 2.14%"
+ * - Inline parenthetical: "D-Limonene (1.44%); β-Caryophyllene (1.24%)"
+ * - Inline bare: "Linalool 0.70%"
+ *
+ * Excludes obvious metric lines (THC/cannabinoids/total terpenes).
  */
-function parseTerpeneLines(text) {
+function extractTerpenePairs(coaText) {
+  const text = String(coaText || "");
+  const lines = text.split(/\r?\n/);
+
   const out = [];
 
-  const lines = String(text || "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const shouldSkipLine = (l) => {
+    const s = l.toLowerCase();
+    return (
+      s.includes("total thc") ||
+      s.includes("thc per unit") ||
+      s.includes("total cannabinoids") ||
+      s.includes("total terpenes") ||
+      s.startsWith("form:")
+    );
+  };
 
-  // 1) Bullet/line style: "- Name 0.123%" or "Name (0.123%)"
-  // We'll scan every line and extract any (name, pct) pairs.
-  for (const line of lines) {
-    // Ignore obvious non-terp metrics lines
-    if (/^total\s+(thc|cannabinoids|terpenes)\b/i.test(line)) continue;
-    if (/^thc\s+per\s+unit\b/i.test(line)) continue;
+  // One-per-line pattern: "- Name 0.123%" or "Name 0.123%"
+  const lineRegex =
+    /(?:^|[-•]\s*)([A-Za-z0-9+./()' \-βααββ]+?)\s+(\d+(\.\d+)?)\s*%/i;
 
-    // Capture patterns like:
-    // "- beta-Caryophyllene 2.26%"
-    // "alpha-Humulene 0.774%"
-    let m = line.match(/^[\-•\s]*([A-Za-zαβΑΒ0-9\-\s]+?)\s+([0-9]+(?:\.[0-9]+)?)\s*%/);
-    if (m) {
-      out.push({ name: m[1].trim(), pct: safeNumber(m[2]) });
-      continue;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (shouldSkipLine(line)) continue;
+
+    // Multi-terp inline pattern: "Name (1.23%)"
+    const parenGlobal =
+      /([A-Za-z0-9+./' \-βααββ]+?)\s*\(\s*(\d+(\.\d+)?)\s*%\s*\)/gi;
+
+    let pm;
+    let foundParen = false;
+    while ((pm = parenGlobal.exec(line)) !== null) {
+      foundParen = true;
+      out.push({ name: pm[1].trim(), pct: Number(pm[2]) });
     }
+    if (foundParen) continue;
 
-    // Capture patterns like:
-    // "β-Caryophyllene (0.75%)"
-    // "D-Limonene (1.44%)"
-    m = line.match(/([A-Za-zαβΑΒ0-9\-\s]+?)\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\)/);
+    const m = line.match(lineRegex);
     if (m) {
-      out.push({ name: m[1].trim(), pct: safeNumber(m[2]) });
-      continue;
-    }
-
-    // Inline band lists on one line, e.g.:
-    // "Primary: D-Limonene (1.44%); β-Caryophyllene (1.24%)"
-    // We extract all "(x.xx%)" occurrences paired with name immediately before it.
-    const inline = [...line.matchAll(/([A-Za-zαβΑΒ0-9\-\s]+?)\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*\)/g)];
-    if (inline.length) {
-      for (const mm of inline) {
-        out.push({ name: mm[1].trim(), pct: safeNumber(mm[2]) });
-      }
-      continue;
-    }
-
-    // Special case: "Pinene (α+β ≈ 0.37%)" — grab the number if present
-    m = line.match(/([A-Za-zαβΑΒ0-9\-\s]+?)\s*\([^)]*?([0-9]+(?:\.[0-9]+)?)\s*%\s*\)/);
-    if (m) {
-      out.push({ name: m[1].trim(), pct: safeNumber(m[2]) });
-      continue;
+      out.push({ name: m[1].trim(), pct: Number(m[2]) });
     }
   }
 
-  // Drop null/invalid pct entries
-  return out.filter((t) => t && t.name && Number.isFinite(Number(t.pct)) && Number(t.pct) > 0);
+  return out;
 }
 
 /**
- * Normalize terpene names + combine duplicates
+ * Normalize and combine duplicate terpenes.
+ * Stores full terpene array with normalized names.
  */
-function normalizeAndCombineTerpenes(terpsRaw) {
-  const totals = new Map();
-  for (const t of terpsRaw || []) {
-    const norm = normalizeTerpName(t.name);
-    const pct = safeNumber(t.pct);
-    if (!norm || !Number.isFinite(pct) || pct <= 0) continue;
-    totals.set(norm, (totals.get(norm) || 0) + pct);
+function normalizeAndCombineTerps(pairs) {
+  const map = new Map();
+  for (const t of pairs) {
+    const name = normalizeTerpName(t.name);
+    const pct = Number(t.pct);
+    if (!name) continue;
+    if (!Number.isFinite(pct) || pct <= 0) continue;
+    map.set(name, (map.get(name) || 0) + pct);
   }
 
-  return Array.from(totals.entries())
-    .map(([name, pct]) => ({
-      name,
-      // keep tidy precision for storage
-      pct: Math.round(pct * 1000) / 1000,
-    }))
+  return Array.from(map.entries())
+    .map(([name, pct]) => ({ name, pct: roundPct(pct) }))
     .sort((a, b) => b.pct - a.pct);
 }
 
 /**
- * Parse a COA text block into a product object:
- * {
- *  id, name, form,
- *  metrics: { totalTHC, totalTerpenes },
- *  terpenes: [{ name: "caryophyllene", pct: 2.26 }, ...]
- * }
+ * Parse a COA text block into a product object in the required format.
+ * - Normalized terpenes
+ * - COA Total Terpenes stored in metrics.totalTerpenes (separate from terp array)
  */
-function parseCoaTextToProduct(text, meta = {}) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
+function parseCoaTextToProduct(coaText, meta = {}) {
+  const text = String(coaText || "").trim();
+  if (!text) return null;
 
-  // Attempt to extract name: usually first non-empty line
-  const firstLine = raw.replace(/\r/g, "").split("\n").map((l) => l.trim()).find(Boolean) || "Unknown Product";
+  const nameLine = firstNonEmptyLine(text);
 
-  // Attempt to extract form (e.g., "Form: Live Badder")
-  const formMatch = raw.match(/^\s*Form\s*:\s*(.+)\s*$/im);
-  const form = formMatch ? formMatch[1].trim() : null;
+  const form =
+    extractLabeledValue(text, /(?:^|\n)\s*form:\s*(.+?)\s*(?:\n|$)/i) || null;
 
-  const totalTHC = extractPercentAfterLabel(raw, "Total\\s*THC");
-  const totalTerpenes = extractPercentAfterLabel(raw, "Total\\s*Terpenes");
+  const totalTHC = toNumber(
+    extractLabeledValue(
+      text,
+      /(?:^|\n)\s*total thc:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
+    )
+  );
 
-  // Extract terpenes from all lines we can recognize
-  const terpsRaw = parseTerpeneLines(raw);
-  const terpenes = normalizeAndCombineTerpenes(terpsRaw);
+  // ✅ COA Total Terpenes (separate from terp array; do not sum terps for this)
+  const totalTerpenes = toNumber(
+    extractLabeledValue(
+      text,
+      /(?:^|\n)\s*total terpenes:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
+    )
+  );
 
-  // If no terpenes found, still return product so UI shows something
-  const product = {
-    id: makeId("prod"),
-    name: firstLine,
-    form: form || "",
+  const totalCannabinoids = toNumber(
+    extractLabeledValue(
+      text,
+      /(?:^|\n)\s*total cannabinoids:\s*([0-9.]+)\s*%\s*(?:\n|$)/i
+    )
+  );
+
+  const thcPerUnitMg = toNumber(
+    extractLabeledValue(
+      text,
+      /(?:^|\n)\s*thc per unit:\s*([0-9.]+)\s*mg\s*(?:\n|$)/i
+    )
+  );
+
+  // ✅ Parse all terpene lines then normalize names before storing
+  const rawPairs = extractTerpenePairs(text);
+  const normalizedTerpenes = normalizeAndCombineTerps(rawPairs);
+
+  // Useful derived field (top 6 normalized/combined) for display/scoring elsewhere
+  const top6 = getTop6Terpenes(normalizedTerpenes);
+
+  return {
+    id: uuid(),
+    name: nameLine,
+    form,
     metrics: {
-      totalTHC: totalTHC ?? null,
-      totalTerpenes: totalTerpenes ?? null, // ✅ COA value stored separately
-      sourceFileName: meta?.sourceFileName || "",
+      totalTHC,
+      totalTerpenes, // ✅ COA value
+      totalCannabinoids,
+      thcPerUnitMg,
+    },
+    // ✅ Full terp array, already normalized + combined
+    terpenes: normalizedTerpenes,
+    // Optional convenience
+    top6,
+    coa: {
+      rawText: text,
+      sourceFileName: meta.sourceFileName || null,
       parsedAt: new Date().toISOString(),
     },
-    terpenes, // ✅ full normalized array
+    createdAt: new Date().toISOString(),
   };
-
-  return product;
 }
 
-/**
- * Split multi-COA pasted text into blocks.
- * Heuristic: split on 3+ newlines, or lines that look like a new product header.
- */
-function splitIntoCoaBlocks(text) {
-  const raw = String(text || "").replace(/\r/g, "").trim();
-  if (!raw) return [];
+// ---------- file reading (txt + optional pdf) ----------
+async function readFileAsText(file) {
+  const name = (file?.name || "").toLowerCase();
 
-  // First try triple newline split (your existing convention)
-  const triple = raw.split(/\n\s*\n\s*\n+/g).map((b) => b.trim()).filter(Boolean);
-  if (triple.length > 1) return triple;
+  // Plain text
+  if (
+    name.endsWith(".txt") ||
+    name.endsWith(".csv") ||
+    name.endsWith(".md") ||
+    file?.type?.startsWith("text/")
+  ) {
+    return await file.text();
+  }
 
-  // Fallback: if user pasted multiple products with a blank line between each
-  const dbl = raw.split(/\n\s*\n+/g).map((b) => b.trim()).filter(Boolean);
-  if (dbl.length > 1) return dbl;
+  // Optional PDF support (only if pdfjs-dist is installed & worker configured)
+  if (name.endsWith(".pdf") || file?.type === "application/pdf") {
+    try {
+      const pdfjsLib = await import("pdfjs-dist");
 
-  return [raw];
+      // NOTE: In Vite, configure workerSrc once in app init if needed:
+      // pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      //   "pdfjs-dist/build/pdf.worker.min.mjs",
+      //   import.meta.url
+      // ).toString();
+
+      const data = new Uint8Array(await file.arrayBuffer());
+      const pdf = await pdfjsLib.getDocument({ data }).promise;
+
+      let out = "";
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        out += content.items.map((it) => it.str).join(" ") + "\n";
+      }
+      return out.trim();
+    } catch {
+      throw new Error(
+        "PDF upload requires pdfjs-dist and worker configuration. Install it or convert PDFs to text first."
+      );
+    }
+  }
+
+  throw new Error(`Unsupported file type: ${file?.name || "unknown"}`);
 }
 
-// ------------------------------
-// Zustand Store
-// ------------------------------
-export const useMmetStore = create((set, get) => ({
-  // ---- State
-  products: [],
-  sessionLog: [],
-  profileName: "Default",
-  scoreMode: "raw", // future: "calibrated"
-  scoreSource: "coa", // future: "coa+log"
-  lastError: null,
-
-  // ---- Actions
-
-  clearProducts: () => {
-    set({ products: [], lastError: null });
-  },
-
-  /**
-   * Parse COA text (single or multiple blocks) and add products to store.
-   */
-  parseCoaText: (text, meta = {}) => {
-    try {
-      const blocks = splitIntoCoaBlocks(text);
-      if (!blocks.length) return;
-
-      const newProducts = [];
-      for (const block of blocks) {
-        const p = parseCoaTextToProduct(block, meta);
-        if (p) newProducts.push(p);
-      }
-
-      if (!newProducts.length) {
-        set({ lastError: "No products could be parsed from that COA text." });
-        return;
-      }
-
-      set((state) => ({
-        products: [...newProducts, ...state.products],
+// ---------- store ----------
+export const useMmetStore = create(
+  devtools(
+    persist(
+      (set, get) => ({
+        // ---- state ----
+        products: [],
+        sessionLog: [],
+        profileName: "Default",
+        scoreMode: "standard",
+        scoreSource: "coa",
         lastError: null,
-      }));
-    } catch (err) {
-      console.error(err);
-      set({ lastError: `Parse failed: ${err?.message || String(err)}` });
-    }
-  },
+        lastParseAt: null,
 
-  /**
-   * Handle uploaded COA files (TXT/MD/CSV supported).
-   * PDFs are not parsed in this version; we surface a clear error.
-   */
-  handleCoaFiles: async (fileList) => {
-    try {
-      const files = Array.from(fileList || []);
-      if (!files.length) return;
+        // ---- actions ----
+        clearProducts: () => set({ products: [], lastError: null }),
 
-      const supportedTextExt = /\.(txt|md|csv)$/i;
+        parseCoaText: (coaText, meta = {}) => {
+          try {
+            const product = parseCoaTextToProduct(coaText, meta);
+            if (!product) return null;
 
-      for (const file of files) {
-        const name = file?.name || "uploaded";
-        const isPdf = /\.pdf$/i.test(name);
+            set((state) => ({
+              products: [product, ...state.products],
+              lastError: null,
+              lastParseAt: new Date().toISOString(),
+            }));
 
-        if (isPdf) {
-          // Production-safe: avoid pretending we parsed a PDF
-          set({
-            lastError:
-              "PDF upload detected. PDF parsing isn't enabled yet in this build. Please export the COA text to .txt or paste the COA text.",
-          });
-          continue;
-        }
+            return product;
+          } catch (e) {
+            set({ lastError: e?.message || "Failed to parse COA text" });
+            return null;
+          }
+        },
 
-        const isText = supportedTextExt.test(name) || file.type?.startsWith("text/");
-        if (!isText) {
-          set({ lastError: `Unsupported file type: ${name}. Use .txt/.md/.csv or paste text.` });
-          continue;
-        }
+        handleCoaFiles: async (files) => {
+          const fileArr = Array.from(files || []);
+          if (fileArr.length === 0) return { added: 0, errors: [] };
 
-        const text = await file.text();
-        get().parseCoaText(text, { sourceFileName: name });
+          const errors = [];
+          let added = 0;
+
+          for (const f of fileArr) {
+            try {
+              const text = await readFileAsText(f);
+              const p = get().parseCoaText(text, { sourceFileName: f.name });
+              if (p) added += 1;
+            } catch (e) {
+              errors.push({
+                file: f?.name || "unknown",
+                error: e?.message || String(e),
+              });
+            }
+          }
+
+          set({ lastError: errors[0]?.error || null });
+          return { added, errors };
+        },
+
+        exportLog: () => {
+          const state = get();
+          const payload = {
+            app: "MMET Predictor",
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            profileName: state.profileName,
+            scoreMode: state.scoreMode,
+            scoreSource: state.scoreSource,
+            sessionLog: state.sessionLog,
+          };
+          return JSON.stringify(payload, null, 2);
+        },
+
+        importLog: (input) => {
+          try {
+            const data =
+              typeof input === "string" ? JSON.parse(input) : input || {};
+            const nextSessionLog = Array.isArray(data.sessionLog)
+              ? data.sessionLog
+              : [];
+
+            set((state) => ({
+              profileName: data.profileName ?? state.profileName,
+              scoreMode: data.scoreMode ?? state.scoreMode,
+              scoreSource: data.scoreSource ?? state.scoreSource,
+              sessionLog: nextSessionLog,
+              lastError: null,
+            }));
+
+            return { ok: true, sessions: nextSessionLog.length };
+          } catch (e) {
+            set({ lastError: e?.message || "Import failed" });
+            return { ok: false, error: e?.message || "Import failed" };
+          }
+        },
+
+        logActuals: ({ sessionId, productId, actuals, notes } = {}) => {
+          if (!sessionId || !productId) {
+            set({ lastError: "logActuals requires sessionId and productId" });
+            return false;
+          }
+
+          const entry = {
+            id: uuid(),
+            at: new Date().toISOString(),
+            productId,
+            actuals: actuals || {},
+            notes: notes || "",
+          };
+
+          set((state) => ({
+            sessionLog: state.sessionLog.map((s) => {
+              if (s.sessionId !== sessionId) return s;
+              return {
+                ...s,
+                actuals: Array.isArray(s.actuals)
+                  ? [...s.actuals, entry]
+                  : [entry],
+              };
+            }),
+            lastError: null,
+          }));
+
+          return true;
+        },
+
+        saveSession: ({ label, productId } = {}) => {
+          const state = get();
+          
+          const product = productId
+            ? state.products.find(p => p.id === productId)
+            : state.products[0];
+
+          if (!product) {
+            set({ lastError: "No product available to save session" });
+            return null;
+          }
+
+          const session = {
+            sessionId: uuid(),
+            createdAt: new Date().toISOString(),
+            label: label || `${product.name} - ${new Date().toLocaleDateString()}`,
+            profileName: state.profileName,
+            scoreMode: state.scoreMode,
+            scoreSource: state.scoreSource,
+            
+            product: {
+              id: product.id,
+              name: product.name,
+              form: product.form,
+              metrics: {
+                totalTHC: product.metrics?.totalTHC,
+                totalTerpenes: product.metrics?.totalTerpenes,
+                totalCannabinoids: product.metrics?.totalCannabinoids,
+                thcPerUnitMg: product.metrics?.thcPerUnitMg,
+              },
+              top6: product.top6?.map(t => ({
+                name: t.name,
+                pct: t.pct,
+                band: t.band || null,
+              })) || [],
+            },
+            
+            productsSnapshot: [product],
+            actuals: [],
+          };
+
+          set((s) => ({
+            sessionLog: [session, ...s.sessionLog],
+            lastError: null,
+          }));
+
+          return session.sessionId;
+        },
+      }),
+      {
+        name: "mmet-predictor-v2",
+        version: 2,
+        partialize: (s) => ({
+          products: s.products,
+          sessionLog: s.sessionLog,
+          profileName: s.profileName,
+          scoreMode: s.scoreMode,
+          scoreSource: s.scoreSource,
+        }),
       }
-
-      set({ lastError: null });
-    } catch (err) {
-      console.error(err);
-      set({ lastError: `File parse failed: ${err?.message || String(err)}` });
-    }
-  },
-
-  /**
-   * Add an "actuals" record (calibration entry) to sessionLog.
-   * session = {
-   *  sessionId?, date?, productId?, productName?, form?,
-   *  metrics?, topTerpenes?, ratings: { pain, head, couch, clarity, duration, functionality, anxiety },
-   *  note?
-   * }
-   */
-  logActuals: (session) => {
-    const entry = {
-      sessionId: session?.sessionId || makeId("sess"),
-      date: session?.date || new Date().toISOString().slice(0, 10),
-      profileName: get().profileName,
-      ...session,
-    };
-
-    set((state) => ({
-      sessionLog: [entry, ...state.sessionLog],
-      lastError: null,
-    }));
-  },
-
-  /**
-   * Alias for logActuals (kept because your requirement lists both).
-   */
-  saveSession: (session) => {
-    get().logActuals(session);
-  },
-
-  /**
-   * Import calibration/session log data.
-   * Supports:
-   * - JSON string
-   * - Parsed object { sessionLog: [...] } or [...]
-   */
-  importLog: (payload) => {
-    try {
-      let data = payload;
-
-      if (typeof payload === "string") {
-        data = JSON.parse(payload);
-      }
-
-      const list = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.sessionLog)
-          ? data.sessionLog
-          : null;
-
-      if (!list) {
-        set({ lastError: "Import failed: expected JSON array or { sessionLog: [...] }." });
-        return;
-      }
-
-      set((state) => ({
-        sessionLog: [...list, ...state.sessionLog],
-        lastError: null,
-      }));
-    } catch (err) {
-      console.error(err);
-      set({ lastError: `Import failed: ${err?.message || String(err)}` });
-    }
-  },
-
-  /**
-   * Export session log as a downloadable JSON file.
-   * Returns string JSON as well (useful for debugging/tests).
-   */
-  exportLog: () => {
-    const state = get();
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      profileName: state.profileName,
-      scoreMode: state.scoreMode,
-      scoreSource: state.scoreSource,
-      sessionLog: state.sessionLog,
-    };
-
-    const json = JSON.stringify(payload, null, 2);
-
-    try {
-      // Browser download
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `mmet_session_log_${state.profileName || "default"}_${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      set({ lastError: null });
-    } catch (err) {
-      console.error(err);
-      set({ lastError: `Export failed: ${err?.message || String(err)}` });
-    }
-
-    return json;
-  },
-
-  /**
-   * Convenience getter (not required but useful):
-   * returns top6 for a product id using normalized terp list.
-   */
-  getTop6ForProduct: (productId) => {
-    const p = get().products.find((x) => x.id === productId);
-    if (!p) return [];
-    return getTop6Terpenes(p.terpenes || []);
-  },
-
-  // Settings setters (useful later)
-  setProfileName: (profileName) => set({ profileName: profileName || "Default" }),
-  setScoreMode: (scoreMode) => set({ scoreMode }),
-  setScoreSource: (scoreSource) => set({ scoreSource }),
-}));
+    ),
+    { name: "MMET Predictor Store v2" }
+  )
+);
