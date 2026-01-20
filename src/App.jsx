@@ -6,6 +6,7 @@ import {
   terpBandFromPct,
   BAND_WEIGHTS,
 } from "./utils/terpenes";
+
 import RatingControls from "./components/RatingControls";
 import ProductCard from "./components/ProductCard";
 import SessionLog from "./components/SessionLog";
@@ -208,6 +209,9 @@ export default function App() {
     <div style={{ maxWidth: 1040, margin: "0 auto", padding: 16, fontFamily: "system-ui, Arial" }}>
       <h1 style={{ marginBottom: 8 }}>MMET Predictor v2</h1>
 
+      {/* ✅ NEW: Session persistence controls */}
+      <SessionLog />
+
       {lastError ? (
         <div style={{ padding: 10, border: "1px solid #f99", background: "#fff5f5", marginBottom: 12 }}>
           <strong>Error:</strong> {lastError}
@@ -279,31 +283,12 @@ export default function App() {
         />
 
         <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-          {/* ✅ Requirement: Rename button */}
           <button onClick={onParseCoasAndScore}>Parse COA(s) &amp; Score</button>
         </div>
       </div>
 
-      {/* Rank-by */}
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>Rank by:</div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {rankKeys.map((rk) => (
-            <button
-              key={rk.key}
-              onClick={() => setSortBy(rk.key)}
-              style={{
-                border: sortBy === rk.key ? "2px solid #111" : "1px solid #ccc",
-                borderRadius: 999,
-                padding: "6px 10px",
-                background: sortBy === rk.key ? "#f0f0f0" : "white",
-              }}
-            >
-              {rk.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* ✅ NEW: Rank-by component */}
+      <RatingControls rankKeys={rankKeys} sortBy={sortBy} onChangeSort={setSortBy} />
 
       {/* Results */}
       <div ref={resultsRef}>
@@ -316,78 +301,9 @@ export default function App() {
         ) : null}
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 12 }}>
-          {sortedProducts.map((p) => {
-            const totalTerp = p?.metrics?.totalTerpenes;
-
-            const topUsed = p?._mmet?.topUsed || [];
-            const scores = p?._mmet?.scores || {};
-
-            return (
-              <div key={p.id} style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontWeight: 800, marginBottom: 4 }}>{p.name}</div>
-                <div style={{ opacity: 0.85, marginBottom: 10 }}>
-                  {p.form ? `Form: ${p.form}` : "Form: —"}
-                </div>
-
-                {/* ✅ Requirement: show COA Total Terpenes */}
-                <div style={{ marginBottom: 8 }}>
-                  <strong>Total Terpenes:</strong>{" "}
-                  {Number.isFinite(Number(totalTerp)) ? `${Number(totalTerp).toFixed(2)}% (COA)` : "—"}
-                </div>
-
-                {/* ✅ Requirement: show Top 6 used */}
-                <div style={{ marginBottom: 10 }}>
-                  <strong>Top 6 Used:</strong>
-                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {topUsed.length ? (
-                      topUsed.map((t) => (
-                        <span
-                          key={`${p.id}_${t.name}`}
-                          style={{
-                            border: "1px solid #ccc",
-                            borderRadius: 999,
-                            padding: "3px 8px",
-                            fontSize: 12,
-                          }}
-                        >
-                          {t.name} {Number(t.pct).toFixed(3)}% • {t.band}
-                        </span>
-                      ))
-                    ) : (
-                      <span style={{ opacity: 0.8 }}>—</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Score cards */}
-                <div style={{ marginTop: 6 }}>
-                  <strong>MMET Score:</strong>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, marginTop: 8 }}>
-                    {rankKeys.map((rk) => (
-                      <div key={rk.key} style={{ border: "1px solid #eee", borderRadius: 10, padding: 8 }}>
-                        <div style={{ fontSize: 12, opacity: 0.85 }}>{rk.label}</div>
-                        <div style={{ fontSize: 18, fontWeight: 800 }}>
-                          {Number(scores[rk.key] ?? 0).toFixed(1)}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <details style={{ marginTop: 10 }}>
-                  <summary style={{ cursor: "pointer" }}>Show parsed terpenes (normalized)</summary>
-                  <div style={{ marginTop: 8, fontSize: 13 }}>
-                    {(p.terpenes || []).slice(0, 24).map((t) => (
-                      <div key={`${p.id}_${t.name}_full`}>
-                        {t.name}: {Number(t.pct).toFixed(3)}%
-                      </div>
-                    ))}
-                    {(p.terpenes || []).length > 24 ? <div>…</div> : null}
-                  </div>
-                </details>
-              </div>
-            );
-          })}
+          {sortedProducts.map((p) => (
+            <ProductCard key={p.id} product={p} rankKeys={rankKeys} />
+          ))}
         </div>
       </div>
     </div>
