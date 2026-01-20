@@ -6,6 +6,9 @@ import {
   terpBandFromPct,
   BAND_WEIGHTS,
 } from "./utils/terpenes";
+import RatingControls from "./components/RatingControls";
+import ProductCard from "./components/ProductCard";
+import SessionLog from "./components/SessionLog";
 
 /**
  * MMET Predictor v2 – App.jsx
