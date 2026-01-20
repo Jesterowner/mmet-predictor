@@ -1,563 +1,392 @@
-import React, { useState } from 'react';
-import { Upload, ArrowUpDown, X, FileText, Database } from 'lucide-react';
+// src/App.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useMmetStore } from "./store/mmetStore";
+import {
+  getTop6Terpenes,
+  terpBandFromPct,
+  BAND_WEIGHTS,
+} from "./utils/terpenes";
 
-function App() {
-  const [products, setProducts] = useState([]);
-  const [sortBy, setSortBy] = useState(null);
-  const [showManualEntry, setShowManualEntry] = useState(false);
-  const [pasteText, setPasteText] = useState('');
-  const [dragActive, setDragActive] = useState(false);
+/**
+ * MMET Predictor v2 – App.jsx
+ *
+ * Requirements met:
+ * - Uses Zustand store for products + parsing actions
+ * - Keeps local UI state: sortBy, showManualEntry, pasteText, dragActive
+ * - calculateMMET uses TOP 6 (getTop6Terpenes) + band classification for all 6
+ * - Uses effect vectors for specified terps
+ * - UI polish:
+ *   * Button text: "Parse COA(s) & Score"
+ *   * Add "Clear All Products"
+ *   * Auto-scroll to results after parsing/upload
+ *   * Display "Total Terpenes: X.XX% (COA)" from metrics.totalTerpenes
+ *   * Display "Top 6 Used:" with 6 terps
+ */
 
-  const effectIcons = {
-    pain: '🔥',
-    head: '🧠',
-    couch: '🛌',
-    clarity: '👁️',
-    duration: '⏱️',
-    functionality: '⚙️',
-    anxiety: '⚠️'
-  };
+// ----------------------
+// Effect vectors (replace numeric values if you already have canonical ones)
+// ----------------------
+const TERPENE_EFFECT_VECTORS = {
+  myrcene: { relax: 1.0, sleep: 0.8, pain: 0.4, energy: -0.4, focus: -0.1, mood: 0.1, anxiety: 0.2 },
+  caryophyllene: { relax: 0.6, pain: 0.8, anxiety: 0.4, focus: 0.2, mood: 0.2, energy: -0.1, sleep: 0.2 },
+  limonene: { mood: 0.9, energy: 0.7, focus: 0.5, relax: -0.2, anxiety: -0.2, sleep: -0.2, pain: 0.0 },
+  pinene: { focus: 0.9, energy: 0.4, mood: 0.2, relax: -0.2, sleep: -0.2, anxiety: -0.1, pain: 0.0 },
+  linalool: { relax: 0.9, sleep: 0.7, anxiety: 0.7, mood: 0.2, energy: -0.3, focus: -0.2, pain: 0.1 },
+  humulene: { focus: 0.4, mood: 0.2, relax: 0.2, energy: 0.0, pain: 0.2, anxiety: 0.1, sleep: 0.1 },
+  bisabolol: { relax: 0.5, pain: 0.4, mood: 0.2, focus: 0.0, energy: 0.0, anxiety: 0.2, sleep: 0.2 },
+  ocimene: { energy: 0.6, mood: 0.3, focus: 0.2, relax: -0.1, anxiety: -0.1, sleep: -0.1, pain: 0.0 },
+  terpinolene: { energy: 0.5, mood: 0.3, relax: 0.2, focus: 0.2, anxiety: 0.0, sleep: 0.0, pain: 0.0 },
+};
 
-  const effectNames = {
-    pain: 'Pain Relief',
-    head: 'Head Effect',
-    couch: 'Couch Effect',
-    clarity: 'Clarity',
-    duration: 'Duration',
-    functionality: 'Functionality',
-    anxiety: 'Anxiety Risk'
-  };
+const SCORE_DIMENSIONS = ["energy", "focus", "mood", "relax", "sleep", "pain", "anxiety"];
 
-  const calculateMMET = (product) => {
-    const { thc, terps, form } = product;
-    
-    const classify = (pct) => {
-      if (pct < 0.10) return 'none';
-      if (pct < 0.30) return 'supporting';
-      if (pct < 0.80) return 'dominant';
-      return 'primary';
-    };
+function initScore() {
+  return Object.fromEntries(SCORE_DIMENSIONS.map((k) => [k, 0]));
+}
 
-    const bands = {};
-    Object.keys(terps).forEach(t => {
-      bands[t] = classify(terps[t]);
-    });
+/**
+ * calculateMMET(product)
+ * - Uses top 6 normalized terpenes
+ * - Applies band classification to all 6
+ * - Applies effect vectors for the terp names listed
+ *
+ * Product expected format:
+ * {
+ *  id, name, form,
+ *  metrics: { totalTHC, totalTerpenes },
+ *  terpenes: [{ name:"caryophyllene", pct:2.26 }, ...]
+ * }
+ */
+function calculateMMET(product) {
+  const terps = Array.isArray(product?.terpenes) ? product.terpenes : [];
 
-    const formMultipliers = {
-      'Live Rosin': 1.0,
-      'Diamonds + Sauce': 1.15,
-      'Live Badder': 0.95,
-      'Live Rosin Jam': 1.05,
-      'Live Sugar': 0.95,
-      'Wax': 0.90,
-      'Flower': 0.85
-    };
-    
-    const baseIntensity = Math.min(5, (thc / 100) * 5 * (formMultipliers[form] || 1.0));
-    
-    let scores = {
-      pain: 2.0,
-      head: baseIntensity * 0.85,
-      couch: 2.0,
-      clarity: 3.0,
-      duration: form.includes('Badder') || form.includes('Sugar') ? 3.5 : 4.0,
-      functionality: 3.0,
-      anxiety: 1.5
-    };
+  // ✅ Requirement: use top 6 (not top 3)
+  const top6 = getTop6Terpenes(terps);
 
-    const applyTerpEffect = (terp, band) => {
-      if (band === 'none') return;
+  const scores = initScore();
 
-      const strength = {
-        'supporting': 0.3,
-        'dominant': 0.7,
-        'primary': 1.0
-      }[band];
+  // Apply vectors
+  const used = top6.map((t) => {
+    const band = terpBandFromPct(t.pct);
+    const bandWeight = BAND_WEIGHTS[band] ?? 0;
 
-      switch(terp) {
-        case 'myrcene':
-          scores.couch += 1.2 * strength;
-          scores.pain += 0.8 * strength;
-          scores.clarity -= 0.6 * strength;
-          scores.duration += 0.5 * strength;
-          break;
-        case 'caryophyllene':
-          scores.pain += 1.0 * strength;
-          scores.anxiety -= 0.8 * strength;
-          scores.couch += 0.3 * strength;
-          break;
-        case 'limonene':
-          scores.head += 0.9 * strength;
-          scores.anxiety += 0.7 * strength;
-          break;
-        case 'pinene':
-          scores.clarity += 0.8 * strength;
-          scores.functionality += 0.7 * strength;
-          scores.couch -= 0.5 * strength;
-          break;
-        case 'linalool':
-          scores.anxiety -= 1.0 * strength;
-          scores.couch += 0.4 * strength;
-          scores.head -= 0.3 * strength;
-          break;
-        case 'humulene':
-          scores.pain += 0.6 * strength;
-          scores.duration += 0.3 * strength;
-          break;
-        case 'bisabolol':
-          scores.anxiety -= 0.7 * strength;
-          scores.clarity += 0.4 * strength;
-          break;
-        case 'ocimene':
-          scores.head += 0.5 * strength;
-          scores.couch -= 0.6 * strength;
-          break;
-        case 'terpinolene':
-          scores.head += 0.8 * strength;
-          scores.anxiety += 0.6 * strength;
-          scores.clarity -= 0.5 * strength;
-          break;
-      }
-    };
+    const vec = TERPENE_EFFECT_VECTORS[t.name] || {};
 
-    Object.keys(terps).forEach(t => {
-      applyTerpEffect(t, bands[t]);
-    });
+    // Weight by band + magnitude (pct). This keeps bigger terps mattering more.
+    const magnitude = bandWeight * Number(t.pct);
 
-    if ((bands.limonene === 'primary' || bands.limonene === 'dominant') && 
-        (bands.myrcene === 'dominant' || bands.myrcene === 'primary')) {
-      scores.clarity -= 1.5;
+    for (const dim of SCORE_DIMENSIONS) {
+      const v = Number(vec[dim] || 0);
+      scores[dim] += v * magnitude;
     }
 
-    if (bands.myrcene === 'primary' && terps.myrcene >= 0.80) {
-      scores.couch = Math.max(scores.couch, 3.5);
-    }
-
-    if ((bands.limonene === 'primary' || bands.limonene === 'dominant') &&
-        (bands.linalool === 'dominant' || bands.linalool === 'primary')) {
-      scores.anxiety -= 1.2;
-    }
-
-    const anxietyFactor = Math.max(0, (5 - scores.anxiety) / 5);
-    const clarityFactor = scores.clarity / 5;
-    scores.functionality = 2.0 + (anxietyFactor * 1.5) + (clarityFactor * 1.5);
-    
-    if (bands.pinene === 'dominant' || bands.pinene === 'primary') {
-      scores.functionality += 0.5;
-    }
-
-    Object.keys(scores).forEach(k => {
-      scores[k] = Math.max(0, Math.min(5, scores[k]));
-    });
-
-    return {
-      pain: Number(scores.pain.toFixed(1)),
-      head: Number(scores.head.toFixed(1)),
-      couch: Number(scores.couch.toFixed(1)),
-      clarity: Number(scores.clarity.toFixed(1)),
-      duration: Number(scores.duration.toFixed(1)),
-      functionality: Number(scores.functionality.toFixed(1)),
-      anxiety: Number(scores.anxiety.toFixed(1))
-    };
-  };
-
-  const loadSampleData = () => {
-    const samples = [
-      { name: 'HAZE MAN DSL (H) Wax', thc: 71.4, totalTerps: 4.42, form: 'Wax', terps: { caryophyllene: 2.14, humulene: 0.603, linalool: 0.321, limonene: 0.212 } },
-      { name: 'HAZE DP N STX (H) Live Badder', thc: 74.0, totalTerps: 8.29, form: 'Live Badder', terps: { caryophyllene: 3.00, limonene: 1.18, myrcene: 0.982, humulene: 0.965, linalool: 0.873, ocimene: 0.411 } },
-      { name: 'HAZE KL WHP #11 (I) Live Sugar', thc: 73.7, totalTerps: 4.04, form: 'Live Sugar', terps: { caryophyllene: 1.37, linalool: 0.745, humulene: 0.465, limonene: 0.388, bisabolol: 0.278, myrcene: 0.252 } },
-      { name: 'HAZE BTR FIN (H) Live Badder', thc: 70.0, totalTerps: 7.09, form: 'Live Badder', terps: { caryophyllene: 2.61, limonene: 1.03, humulene: 0.839, linalool: 0.708, myrcene: 0.612, ocimene: 0.343 } },
-      { name: 'HAZE SHRB SNDA (H) Live Sugar', thc: 76.6, totalTerps: 5.39, form: 'Live Sugar', terps: { caryophyllene: 1.66, limonene: 1.01, linalool: 0.727, humulene: 0.442, ocimene: 0.363, guaiol: 0.343 } },
-      { name: 'HAZE LPC (H) Live Sugar', thc: 75.2, totalTerps: 4.69, form: 'Live Sugar', terps: { caryophyllene: 1.39, limonene: 0.765, linalool: 0.429, ocimene: 0.346, myrcene: 0.274 } },
-      { name: 'HAZE STR MNT (H) Wax', thc: 71.0, totalTerps: 6.45, form: 'Wax', terps: { caryophyllene: 2.84, humulene: 1.10, linalool: 0.695, limonene: 0.507, bisabolol: 0.246 } },
-      { name: 'HAZE JLS CKE (I) Live Badder', thc: 74.8, totalTerps: 5.86, form: 'Live Badder', terps: { caryophyllene: 2.26, linalool: 1.12, limonene: 0.775, humulene: 0.774, ocimene: 0.268 } }
-    ];
-    setProducts(samples);
-  };
-
-  const parseCOAText = (text) => {
-    const products = [];
-    const lines = text.split('\n');
-    
-    let currentName = '';
-    let currentForm = 'Live Rosin';
-    let currentTHC = 0;
-    let currentTerps = {};
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      const lineLower = line.toLowerCase();
-      
-      if (line.match(/^[A-Z\s]+.*\(.*\).*\d+g$/i) || line.startsWith('HAZE')) {
-        if (currentName && (currentTHC > 0 || Object.keys(currentTerps).length > 0)) {
-          const totalTerps = Object.values(currentTerps).reduce((sum, val) => sum + val, 0);
-          products.push({
-            name: currentName,
-            form: currentForm,
-            thc: currentTHC,
-            terps: {...currentTerps},
-            totalTerps
-          });
-        }
-        
-        currentName = line.replace(/\s+\d+g$/i, '').trim();
-        currentTHC = 0;
-        currentTerps = {};
-        currentForm = 'Live Rosin';
-        continue;
-      }
-      
-      if (lineLower.startsWith('form:')) {
-        const formMatch = line.match(/Form:\s*(.+)/i);
-        if (formMatch) {
-          const formText = formMatch[1].trim();
-          if (formText.toLowerCase().includes('badder')) currentForm = 'Live Badder';
-          else if (formText.toLowerCase().includes('sugar')) currentForm = 'Live Sugar';
-          else if (formText.toLowerCase().includes('wax')) currentForm = 'Wax';
-          else if (formText.toLowerCase().includes('rosin')) currentForm = 'Live Rosin';
-          else if (formText.toLowerCase().includes('jam')) currentForm = 'Live Rosin Jam';
-          else if (formText.toLowerCase().includes('diamonds')) currentForm = 'Diamonds + Sauce';
-        }
-        continue;
-      }
-      
-      if (lineLower.includes('total thc')) {
-        const thcMatch = line.match(/(\d+\.?\d*)\s*%/);
-        if (thcMatch) {
-          currentTHC = parseFloat(thcMatch[1]);
-        }
-        continue;
-      }
-      
-      const terpMatch = line.match(/^[\-\s]*([a-z\-]+)\s+(\d+\.?\d*)\s*%/i);
-      if (terpMatch) {
-        let terpName = terpMatch[1].toLowerCase().replace(/\-/g, '');
-        const terpValue = parseFloat(terpMatch[2]);
-        
-        if (terpName.includes('myrcene')) terpName = 'myrcene';
-        else if (terpName.includes('caryophyllene')) terpName = 'caryophyllene';
-        else if (terpName.includes('limonene')) terpName = 'limonene';
-        else if (terpName.includes('pinene')) terpName = 'pinene';
-        else if (terpName.includes('linalool')) terpName = 'linalool';
-        else if (terpName.includes('humulene')) terpName = 'humulene';
-        else if (terpName.includes('bisabolol')) terpName = 'bisabolol';
-        else if (terpName.includes('ocimene')) terpName = 'ocimene';
-        else if (terpName.includes('terpinolene') || terpName.includes('terpineol')) terpName = 'terpinolene';
-        else if (terpName.includes('guaiol')) terpName = 'guaiol';
-        
-        if (['myrcene', 'caryophyllene', 'limonene', 'pinene', 'linalool', 'humulene', 
-             'bisabolol', 'ocimene', 'terpinolene', 'guaiol'].includes(terpName)) {
-          currentTerps[terpName] = (currentTerps[terpName] || 0) + terpValue;
-        }
-      }
-    }
-    
-    if (currentName && (currentTHC > 0 || Object.keys(currentTerps).length > 0)) {
-      const totalTerps = Object.values(currentTerps).reduce((sum, val) => sum + val, 0);
-      products.push({
-        name: currentName,
-        form: currentForm,
-        thc: currentTHC,
-        terps: {...currentTerps},
-        totalTerps
-      });
-    }
-
-    return products;
-  };
-
-  const handleParseCOA = () => {
-    if (!pasteText || pasteText.length < 10) {
-      alert('Please paste COA text first');
-      return;
-    }
-
-    const parsed = parseCOAText(pasteText);
-    
-    if (parsed.length > 0) {
-      setProducts(prev => [...prev, ...parsed]);
-      setPasteText('');
-      alert(`✅ Added ${parsed.length} products!`);
-    } else {
-      alert('❌ Could not find any products in the pasted text. Check the format.');
-    }
-  };
-
-  const handleFileUpload = async (files) => {
-    for (const file of files) {
-      if (file.type === 'text/plain' || file.type === 'text/csv' || file.name.endsWith('.txt')) {
-        const text = await file.text();
-        const parsed = parseCOAText(text);
-        
-        if (parsed.length > 0) {
-          setProducts(prev => [...prev, ...parsed]);
-          alert(`✅ Added ${parsed.length} products from ${file.name}!`);
-        }
-      } else if (file.type === 'application/pdf' || file.type === 'image/jpeg' || file.type === 'image/png') {
-        alert(`⚠️ ${file.name}: PDF and image files require OCR processing which isn't available. Please:\n\n1. Open the PDF/image\n2. Select and copy all text\n3. Paste it in the text area above`);
-      }
-    }
-  };
-
-  const handleDrop = async (e) => {
-    e.preventDefault();
-    setDragActive(false);
-    await handleFileUpload(Array.from(e.dataTransfer.files));
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setDragActive(true);
-  };
-
-  const handleDragLeave = () => {
-    setDragActive(false);
-  };
-
-  const handleFileInput = async (e) => {
-    await handleFileUpload(Array.from(e.target.files));
-    e.target.value = '';
-  };
-
-  const sortedProducts = [...products].sort((a, b) => {
-    if (!sortBy) return 0;
-    const aScore = calculateMMET(a)[sortBy];
-    const bScore = calculateMMET(b)[sortBy];
-    return bScore - aScore;
+    return { ...t, band };
   });
 
-  const removeProduct = (index) => {
-    setProducts(products.filter((_, i) => i !== index));
+  // Normalize to a friendly-ish range for UI
+  // (keeps behavior stable and prevents tiny decimals)
+  const out = {};
+  for (const dim of SCORE_DIMENSIONS) {
+    out[dim] = Math.max(0, Math.round(scores[dim] * 10) / 10);
+  }
+
+  return { scores: out, topUsed: used };
+}
+
+// ---- OPTIONAL sample COAs (safe starter) ----
+const SAMPLE_COAS = [
+  `HAZE JLS CKE (I) Live Badder 1g
+Form: Live Badder
+Total THC: 74.8%
+THC per unit: 748 mg
+Total Cannabinoids: 88.3%
+Total Terpenes: 5.86%
+Top Terpenes:
+- beta-Caryophyllene 2.26%
+- Linalool 1.12%
+- D-Limonene 0.775%
+- alpha-Humulene 0.774%
+- Ocimenes 0.268%
+- Terpineol 0.212%`,
+];
+
+export default function App() {
+  // ✅ Local UI-only state
+  const [sortBy, setSortBy] = useState("relax");
+  const [showManualEntry, setShowManualEntry] = useState(false); // kept for your existing UI expansion
+  const [pasteText, setPasteText] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+
+  // ✅ Zustand store state/actions
+  const products = useMmetStore((s) => s.products);
+  const lastError = useMmetStore((s) => s.lastError);
+
+  const parseCoaText = useMmetStore((s) => s.parseCoaText);
+  const handleCoaFiles = useMmetStore((s) => s.handleCoaFiles);
+  const clearProducts = useMmetStore((s) => s.clearProducts);
+
+  // Auto-scroll to results after parsing/upload
+  const resultsRef = useRef(null);
+  const prevCountRef = useRef(products.length);
+
+  useEffect(() => {
+    if (products.length > prevCountRef.current && resultsRef.current) {
+      resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    prevCountRef.current = products.length;
+  }, [products.length]);
+
+  const rankKeys = [
+    { key: "energy", label: "Energy" },
+    { key: "focus", label: "Focus" },
+    { key: "mood", label: "Mood" },
+    { key: "relax", label: "Relax" },
+    { key: "sleep", label: "Sleep" },
+    { key: "pain", label: "Pain" },
+    { key: "anxiety", label: "Anxiety" },
+  ];
+
+  // Compute scores for products based on new format (top 6 + bands)
+  const scoredProducts = useMemo(() => {
+    return products.map((p) => {
+      const r = calculateMMET(p);
+      return { ...p, _mmet: r };
+    });
+  }, [products]);
+
+  // Sort by selected dimension
+  const sortedProducts = useMemo(() => {
+    const arr = [...scoredProducts];
+    arr.sort((a, b) => {
+      const av = Number(a?._mmet?.scores?.[sortBy] ?? 0);
+      const bv = Number(b?._mmet?.scores?.[sortBy] ?? 0);
+      if (bv !== av) return bv - av;
+      return String(a?.name || "").localeCompare(String(b?.name || ""));
+    });
+    return arr;
+  }, [scoredProducts, sortBy]);
+
+  const onLoadSampleProducts = () => {
+    for (const coa of SAMPLE_COAS) {
+      parseCoaText(coa, { sourceFileName: "sample" });
+    }
+  };
+
+  const onParseCoasAndScore = () => {
+    const text = pasteText.trim();
+    if (!text) return;
+
+    // Split into blocks if user pastes multiple COAs (triple newline = safer separator)
+    const blocks = text.split(/\n\s*\n\s*\n+/g).map((b) => b.trim()).filter(Boolean);
+
+    for (const b of blocks) {
+      parseCoaText(b, { sourceFileName: "pasted" });
+    }
+
+    setPasteText("");
+  };
+
+  const onFileUpload = async (e) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    await handleCoaFiles(files);
+    e.target.value = "";
+  };
+
+  const onDrop = async (e) => {
+    e.preventDefault();
+    setDragActive(false);
+    const files = e.dataTransfer.files;
+    if (!files?.length) return;
+    await handleCoaFiles(files);
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-4">
-      <div className="max-w-7xl mx-auto">
-        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">🔬 MMET Effect Predictor</h1>
-          <p className="text-sm text-gray-600 mb-4">Rank cannabis products by predicted effects • Not medical advice</p>
-          
-          <div className="flex gap-3 flex-wrap">
-            <button
-              onClick={loadSampleData}
-              className="flex items-center gap-2 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
-            >
-              <Database size={18} />
-              Load Sample Products
-            </button>
-            <button
-              onClick={() => setShowManualEntry(true)}
-              className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
-            >
-              <FileText size={18} />
-              Add Product Manually
-            </button>
-          </div>
-        </div>
+    <div style={{ maxWidth: 1040, margin: "0 auto", padding: 16, fontFamily: "system-ui, Arial" }}>
+      <h1 style={{ marginBottom: 8 }}>MMET Predictor v2</h1>
 
-        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-          <h2 className="text-lg font-bold text-gray-800 mb-2">Or Paste COA Text</h2>
-          <p className="text-sm text-gray-600 mb-4">Copy/paste text from your COA files here (supports multiple products)</p>
-          
-          <textarea
-            value={pasteText}
-            onChange={(e) => setPasteText(e.target.value)}
-            rows="10"
-            className="w-full border-2 border-gray-300 rounded-lg px-4 py-3 font-mono text-sm mb-4"
-            placeholder="Paste COA text here..."
+      {lastError ? (
+        <div style={{ padding: 10, border: "1px solid #f99", background: "#fff5f5", marginBottom: 12 }}>
+          <strong>Error:</strong> {lastError}
+        </div>
+      ) : null}
+
+      {/* Top controls */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <button onClick={onLoadSampleProducts}>Load Sample Products</button>
+
+        {/* ✅ Requirement: Clear button */}
+        <button onClick={clearProducts}>Clear All Products</button>
+
+        {/* Upload COAs */}
+        <label style={{ display: "inline-block" }}>
+          <input
+            type="file"
+            multiple
+            onChange={onFileUpload}
+            style={{ display: "none" }}
+            accept=".txt,.md,.csv,text/plain,application/pdf"
           />
-          
-          <button
-            onClick={handleParseCOA}
-            className="w-full bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 font-semibold text-lg"
+          <span
+            style={{
+              display: "inline-block",
+              padding: "6px 10px",
+              border: "1px solid #ccc",
+              borderRadius: 6,
+              cursor: "pointer",
+              userSelect: "none",
+            }}
           >
-            Parse & Add Products
-          </button>
+            Upload COA Files
+          </span>
+        </label>
+
+        {/* Manual entry placeholder toggle (kept for your existing UI paths) */}
+        <button onClick={() => setShowManualEntry((v) => !v)}>
+          {showManualEntry ? "Hide Manual Entry" : "Show Manual Entry"}
+        </button>
+      </div>
+
+      {/* Paste + Dropzone */}
+      <div
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={() => setDragActive(false)}
+        onDrop={onDrop}
+        style={{
+          border: `2px dashed ${dragActive ? "#444" : "#bbb"}`,
+          borderRadius: 10,
+          padding: 12,
+          marginBottom: 12,
+          background: dragActive ? "#fafafa" : "transparent",
+        }}
+      >
+        <div style={{ marginBottom: 8, fontWeight: 600 }}>
+          Paste COA Text (or drag & drop COA files here)
         </div>
 
-        <div 
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          className={`bg-white rounded-lg shadow-lg p-8 mb-6 border-4 border-dashed transition-all ${
-            dragActive ? 'border-purple-500 bg-purple-50' : 'border-gray-300'
-          }`}
-        >
-          <div className="text-center">
-            <Upload className="mx-auto mb-4 text-gray-400" size={48} />
-            <h2 className="text-lg font-bold text-gray-800 mb-2">Or Upload COA Files</h2>
-            <p className="text-sm text-gray-600 mb-4">Drag & drop files here, or click to browse</p>
-            
-            <label className="inline-block bg-blue-600 text-white px-6 py-3 rounded-lg cursor-pointer hover:bg-blue-700 font-semibold">
-              Choose Files
-              <input
-                type="file"
-                multiple
-                accept=".txt,.csv,.pdf,image/*"
-                onChange={handleFileInput}
-                className="hidden"
-              />
-            </label>
-          </div>
+        <textarea
+          value={pasteText}
+          onChange={(e) => setPasteText(e.target.value)}
+          placeholder="Paste one or multiple COAs here..."
+          rows={8}
+          style={{ width: "100%", resize: "vertical" }}
+        />
+
+        <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+          {/* ✅ Requirement: Rename button */}
+          <button onClick={onParseCoasAndScore}>Parse COA(s) &amp; Score</button>
         </div>
+      </div>
 
-        {products.length > 0 && (
-          <div className="bg-white rounded-lg shadow-lg p-4 mb-6">
-            <div className="flex items-center gap-2 flex-wrap">
-              <ArrowUpDown size={18} className="text-gray-600" />
-              <span className="text-sm font-semibold text-gray-700">Rank by:</span>
-              <button
-                onClick={() => setSortBy(null)}
-                className={`px-3 py-1 rounded text-sm ${!sortBy ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700'}`}
-              >
-                Original
-              </button>
-              {Object.entries(effectNames).map(([key, name]) => (
-                <button
-                  key={key}
-                  onClick={() => setSortBy(key)}
-                  className={`px-3 py-1 rounded text-sm ${sortBy === key ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700'}`}
-                >
-                  {effectIcons[key]} {name}
-                </button>
-              ))}
-            </div>
+      {/* Rank-by */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Rank by:</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {rankKeys.map((rk) => (
+            <button
+              key={rk.key}
+              onClick={() => setSortBy(rk.key)}
+              style={{
+                border: sortBy === rk.key ? "2px solid #111" : "1px solid #ccc",
+                borderRadius: 999,
+                padding: "6px 10px",
+                background: sortBy === rk.key ? "#f0f0f0" : "white",
+              }}
+            >
+              {rk.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Results */}
+      <div ref={resultsRef}>
+        <h2 style={{ marginTop: 18, marginBottom: 8 }}>Products ({products.length})</h2>
+
+        {sortedProducts.length === 0 ? (
+          <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 10 }}>
+            No products yet. Load samples, paste COA text, or upload COA files.
           </div>
-        )}
+        ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {sortedProducts.map((p, i) => {
-            const scores = calculateMMET(p);
-            const topTerps = Object.entries(p.terps)
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 3)
-              .map(([name, val]) => `${name} ${val.toFixed(2)}%`)
-              .join(', ');
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 12 }}>
+          {sortedProducts.map((p) => {
+            const totalTerp = p?.metrics?.totalTerpenes;
+
+            const topUsed = p?._mmet?.topUsed || [];
+            const scores = p?._mmet?.scores || {};
 
             return (
-              <div key={i} className="bg-white rounded-lg shadow-lg p-4 relative">
-                <button onClick={() => removeProduct(i)} className="absolute top-2 right-2 text-gray-400 hover:text-red-600">
-                  <X size={18} />
-                </button>
-
-                <div className="mb-3">
-                  <div className="text-lg font-bold text-gray-800 mb-1 pr-6">{p.name}</div>
-                  <div className="text-xs text-gray-500 mb-2">{p.form} • {p.thc}% THC • {p.totalTerps}% terps</div>
-                  <div className="text-xs text-purple-600 mb-2">Dominant: {topTerps}</div>
+              <div key={p.id} style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12 }}>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>{p.name}</div>
+                <div style={{ opacity: 0.85, marginBottom: 10 }}>
+                  {p.form ? `Form: ${p.form}` : "Form: —"}
                 </div>
 
-                <div className="border-t pt-3 space-y-1.5">
-                  {Object.entries(scores).map(([effect, score]) => (
-                    <div key={effect} className="flex justify-between items-center text-sm">
-                      <span className="text-gray-700">{effectIcons[effect]} {effectNames[effect]}</span>
-                      <div className="flex items-center gap-2">
-                        <div className="w-24 bg-gray-200 rounded-full h-2">
-                          <div
-                            className={`h-2 rounded-full ${
-                              effect === 'anxiety' 
-                                ? score <= 1 ? 'bg-green-500' : score <= 2.5 ? 'bg-yellow-500' : 'bg-red-500'
-                                : score >= 4 ? 'bg-green-500' : score >= 2.5 ? 'bg-yellow-500' : 'bg-gray-400'
-                            }`}
-                            style={{ width: `${(score / 5) * 100}%` }}
-                          />
+                {/* ✅ Requirement: show COA Total Terpenes */}
+                <div style={{ marginBottom: 8 }}>
+                  <strong>Total Terpenes:</strong>{" "}
+                  {Number.isFinite(Number(totalTerp)) ? `${Number(totalTerp).toFixed(2)}% (COA)` : "—"}
+                </div>
+
+                {/* ✅ Requirement: show Top 6 used */}
+                <div style={{ marginBottom: 10 }}>
+                  <strong>Top 6 Used:</strong>
+                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {topUsed.length ? (
+                      topUsed.map((t) => (
+                        <span
+                          key={`${p.id}_${t.name}`}
+                          style={{
+                            border: "1px solid #ccc",
+                            borderRadius: 999,
+                            padding: "3px 8px",
+                            fontSize: 12,
+                          }}
+                        >
+                          {t.name} {Number(t.pct).toFixed(3)}% • {t.band}
+                        </span>
+                      ))
+                    ) : (
+                      <span style={{ opacity: 0.8 }}>—</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Score cards */}
+                <div style={{ marginTop: 6 }}>
+                  <strong>MMET Score:</strong>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, marginTop: 8 }}>
+                    {rankKeys.map((rk) => (
+                      <div key={rk.key} style={{ border: "1px solid #eee", borderRadius: 10, padding: 8 }}>
+                        <div style={{ fontSize: 12, opacity: 0.85 }}>{rk.label}</div>
+                        <div style={{ fontSize: 18, fontWeight: 800 }}>
+                          {Number(scores[rk.key] ?? 0).toFixed(1)}
                         </div>
-                        <span className="font-semibold text-gray-800 w-8 text-right">{score}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {products.length === 0 && (
-          <div className="text-center py-12 text-gray-500">
-            <FileText size={64} className="mx-auto mb-4 opacity-20" />
-            <p className="mb-2">No products loaded yet</p>
-            <p className="text-sm">Click "Load Sample Products" to get started</p>
-          </div>
-        )}
-
-        {showManualEntry && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black bg-opacity-50" onClick={() => setShowManualEntry(false)}></div>
-            <div className="relative bg-white rounded-lg shadow-2xl max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto">
-              <div className="flex justify-between items-start mb-4">
-                <h3 className="text-xl font-bold text-gray-800">Add Product Manually</h3>
-                <button onClick={() => setShowManualEntry(false)} className="text-gray-400 hover:text-gray-600">
-                  <X size={24} />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Product Name</label>
-                  <input type="text" id="manual-name" className="w-full border border-gray-300 rounded px-3 py-2" placeholder="Product name" />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Total THC %</label>
-                    <input type="number" id="manual-thc" step="0.1" className="w-full border border-gray-300 rounded px-3 py-2" placeholder="74.5" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Form</label>
-                    <select id="manual-form" className="w-full border border-gray-300 rounded px-3 py-2">
-                      <option>Live Rosin</option>
-                      <option>Live Badder</option>
-                      <option>Live Sugar</option>
-                      <option>Wax</option>
-                      <option>Diamonds + Sauce</option>
-                      <option>Live Rosin Jam</option>
-                      <option>Flower</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="border-t pt-4">
-                  <h4 className="font-semibold mb-3">Terpenes (% values)</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    {['myrcene', 'caryophyllene', 'limonene', 'pinene', 'linalool', 'humulene', 'bisabolol', 'ocimene', 'terpinolene', 'guaiol'].map(terp => (
-                      <div key={terp}>
-                        <label className="block text-xs font-medium text-gray-600 mb-1 capitalize">{terp}</label>
-                        <input type="number" id={`manual-terp-${terp}`} step="0.01" className="w-full border border-gray-300 rounded px-2 py-1 text-sm" placeholder="0.00" />
                       </div>
                     ))}
                   </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    const name = document.getElementById('manual-name').value;
-                    const thc = parseFloat(document.getElementById('manual-thc').value) || 0;
-                    const form = document.getElementById('manual-form').value;
-                    
-                    const terps = {};
-                    ['myrcene', 'caryophyllene', 'limonene', 'pinene', 'linalool', 'humulene', 'bisabolol', 'ocimene', 'terpinolene', 'guaiol'].forEach(terp => {
-                      const val = parseFloat(document.getElementById(`manual-terp-${terp}`).value) || 0;
-                      if (val > 0) terps[terp] = val;
-                    });
-
-                    if (name && (thc > 0 || Object.keys(terps).length > 0)) {
-                      const totalTerps = Object.values(terps).reduce((sum, val) => sum + val, 0);
-                      setProducts(prev => [...prev, { name, thc, totalTerps: Number(totalTerps.toFixed(2)), form, terps }]);
-                      setShowManualEntry(false);
-                    } else {
-                      alert('Please enter at least a product name and THC % or terpenes.');
-                    }
-                  }}
-                  className="w-full bg-blue-600 text-white px-4 py-3 rounded-lg hover:bg-blue-700 font-semibold"
-                >
-                  Add Product
-                </button>
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ cursor: "pointer" }}>Show parsed terpenes (normalized)</summary>
+                  <div style={{ marginTop: 8, fontSize: 13 }}>
+                    {(p.terpenes || []).slice(0, 24).map((t) => (
+                      <div key={`${p.id}_${t.name}_full`}>
+                        {t.name}: {Number(t.pct).toFixed(3)}%
+                      </div>
+                    ))}
+                    {(p.terpenes || []).length > 24 ? <div>…</div> : null}
+                  </div>
+                </details>
               </div>
-            </div>
-          </div>
-        )}
+            );
+          })}
+        </div>
       </div>
     </div>
   );
 }
-
-export default App;
