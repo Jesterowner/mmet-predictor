@@ -6,7 +6,7 @@ import { normalizeTerpName, getTop6Terpenes, roundPct } from "../utils/terpenes"
 
 // Configure PDF worker for production
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@5.4.530/build/pdf.worker.min.mjs';
 }
 
 const uuid = () => {
