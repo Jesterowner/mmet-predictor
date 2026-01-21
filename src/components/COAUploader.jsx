@@ -1,156 +1,134 @@
-import React, { useMemo, useState } from "react";
+// src/components/COAUploader.jsx - Clean version without legacy sections
+import { useRef, useState } from "react";
 import { useMmetStore } from "../store/mmetStore";
 
 export default function COAUploader() {
-  const {
-    products,
-    lastError,
-    lastFileName,
-    lastFileTextPreview,
-    lastTerpeneProbe,
-    handleCoaFiles,
-    clearProducts,
-    applyTerpenePaste,
-  } = useMmetStore();
+  const { handleCoaFiles } = useMmetStore();
+  const fileInputRef = useRef(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [status, setStatus] = useState(null);
 
-  const [status, setStatus] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [selectedProductId, setSelectedProductId] = useState("");
-  const [terpPaste, setTerpPaste] = useState("");
-
-  const selected = useMemo(() => {
-    return products.find((p) => p.id === selectedProductId) || products[0] || null;
-  }, [products, selectedProductId]);
-
-  async function onFiles(e) {
-    const files = e.target.files;
+  const handleFiles = async (files) => {
     if (!files || files.length === 0) return;
-    setBusy(true);
-    setStatus("");
-    try {
-      const res = await handleCoaFiles(files);
-      setStatus(`Added ${res.added} product(s). Errors: ${res.errors?.length || 0}`);
-      if (!selectedProductId && products?.[0]?.id) setSelectedProductId(products[0].id);
-    } catch (err) {
-      setStatus(err?.message || String(err));
-    } finally {
-      setBusy(false);
-      e.target.value = "";
+
+    setStatus({ type: "loading", message: "Processing files..." });
+
+    const result = await handleCoaFiles(files);
+
+    if (result.errors && result.errors.length > 0) {
+      setStatus({
+        type: "error",
+        message: `Added ${result.added} product(s). Errors: ${result.errors.length}`,
+        details: result.errors,
+      });
+    } else if (result.added > 0) {
+      setStatus({
+        type: "success",
+        message: `✓ Successfully added ${result.added} product(s)`,
+      });
+      setTimeout(() => setStatus(null), 3000);
+    } else {
+      setStatus({
+        type: "error",
+        message: "No products could be parsed from the files",
+      });
     }
-  }
+  };
 
-  function onClear() {
-    clearProducts();
-    setSelectedProductId("");
-    setStatus("Cleared products.");
-  }
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    
+    const files = e.dataTransfer?.files;
+    if (files) handleFiles(files);
+  };
 
-  function onApplyTerps() {
-    if (!selected) return setStatus("No product selected.");
-    const ok = applyTerpenePaste({ productId: selected.id, terpText: terpPaste });
-    setStatus(ok ? "Applied terpenes to product." : "Failed to apply terpenes (see error).");
-  }
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  };
+
+  const handleFileInput = (e) => {
+    const files = e.target?.files;
+    if (files) handleFiles(files);
+  };
 
   return (
-    <div className="bg-white rounded-2xl shadow p-4 border border-gray-100">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="text-lg font-semibold">COA Upload</div>
-        <button
-          onClick={onClear}
-          className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-sm"
+    <div className="bg-white rounded-xl shadow-md p-6">
+      <div className="flex items-center gap-3 mb-4">
+        <div className="text-3xl">📤</div>
+        <h2 className="text-xl font-bold text-gray-800">Upload COA</h2>
+      </div>
+
+      {/* Drag & Drop Zone */}
+      <div
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onClick={() => fileInputRef.current?.click()}
+        className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
+          dragActive
+            ? "border-green-500 bg-green-50"
+            : "border-gray-300 hover:border-green-400 hover:bg-gray-50"
+        }`}
+      >
+        <div className="text-5xl mb-3">📄</div>
+        <p className="text-lg font-semibold text-gray-700 mb-1">
+          Drop PDF/TXT files here or click to browse
+        </p>
+        <p className="text-sm text-gray-500">
+          Supports single or batch upload (.pdf, .txt, .csv, .md)
+        </p>
+      </div>
+
+      {/* Hidden File Input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf,.txt,.csv,.md"
+        multiple
+        onChange={handleFileInput}
+        className="hidden"
+      />
+
+      {/* Status Messages */}
+      {status && (
+        <div
+          className={`mt-4 p-4 rounded-lg ${
+            status.type === "success"
+              ? "bg-green-50 border border-green-200 text-green-800"
+              : status.type === "error"
+              ? "bg-red-50 border border-red-200 text-red-800"
+              : "bg-blue-50 border border-blue-200 text-blue-800"
+          }`}
         >
-          Clear Products
-        </button>
-      </div>
-
-      <div className="mt-3">
-        <input
-          type="file"
-          accept=".pdf,.txt,.csv,text/plain,application/pdf"
-          multiple
-          onChange={onFiles}
-          disabled={busy}
-        />
-        <div className="mt-2 text-sm text-gray-700">
-          {busy ? "Working..." : status || (lastError ? `Error: ${lastError}` : "")}
-        </div>
-      </div>
-
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="p-3 rounded-xl bg-gray-50 border border-gray-200">
-          <div className="text-sm font-semibold">Select product to update</div>
-          <select
-            className="mt-2 w-full p-2 rounded-lg border border-gray-300 bg-white"
-            value={selectedProductId}
-            onChange={(e) => setSelectedProductId(e.target.value)}
-          >
-            <option value="">(Auto: newest)</option>
-            {products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name || p.id}
-              </option>
-            ))}
-          </select>
-
-          {selected && (
-            <div className="mt-3 text-sm">
-              <div className="font-semibold">{selected.name}</div>
-              <div className="text-gray-700">
-                Form: {selected.form || "—"}{" "}
-                | THC: {selected.metrics?.totalTHC ?? "—"}%{" "}
-                | Terps: {selected.metrics?.totalTerpenes ?? "—"}%
-              </div>
-              <div className="mt-1 text-gray-700">
-                Terpenes parsed: <span className="font-semibold">{selected.terpenes?.length || 0}</span>
-              </div>
+          <p className="font-semibold">{status.message}</p>
+          {status.details && status.details.length > 0 && (
+            <div className="mt-2 text-sm space-y-1">
+              {status.details.map((err, i) => (
+                <div key={i}>
+                  • {err.file}: {err.error}
+                </div>
+              ))}
             </div>
           )}
         </div>
+      )}
 
-        <div className="p-3 rounded-xl bg-gray-50 border border-gray-200">
-          <div className="text-sm font-semibold">Paste terpenes (pipeline test)</div>
-          <textarea
-            className="mt-2 w-full min-h-[140px] p-2 rounded-lg border border-gray-300 bg-white font-mono text-xs"
-            value={terpPaste}
-            onChange={(e) => setTerpPaste(e.target.value)}
-            placeholder={`beta-Caryophyllene 2.26%\nLinalool 1.12%\nD-Limonene 0.775%\nalpha-Humulene 0.774%`}
-          />
-          <button
-            onClick={onApplyTerps}
-            className="mt-2 px-3 py-2 rounded-xl bg-gray-900 hover:bg-gray-800 text-white text-sm"
-          >
-            Apply Terpenes to Product
-          </button>
-
-          <div className="mt-3 text-xs text-gray-600">
-            Expected: terp count becomes &gt; 0 and scores update.
-          </div>
-        </div>
+      {/* Help Text */}
+      <div className="mt-4 text-xs text-gray-500 space-y-1">
+        <p>• Upload dispensary COA files (PDF or text format)</p>
+        <p>• Multiple files will be processed automatically</p>
+        <p>• Each COA will create a new product with baseline predictions</p>
       </div>
-
-      <details className="mt-4">
-        <summary className="cursor-pointer text-sm font-semibold text-gray-800">
-          Extracted PDF Text Debug
-        </summary>
-
-        <div className="mt-2 text-xs text-gray-700">
-          Last file: <span className="font-mono">{lastFileName || "—"}</span>
-        </div>
-
-        <div className="mt-3">
-          <div className="text-xs font-semibold text-gray-800">Terpene probe (near “TERPEN” if found)</div>
-          <pre className="mt-2 text-xs bg-gray-50 border border-gray-200 p-2 rounded max-h-56 overflow-auto whitespace-pre-wrap">
-{lastTerpeneProbe || "No 'TERPEN' substring found in extracted text preview."}
-          </pre>
-        </div>
-
-        <div className="mt-3">
-          <div className="text-xs font-semibold text-gray-800">First 4000 chars of extracted text</div>
-          <pre className="mt-2 text-xs bg-gray-50 border border-gray-200 p-2 rounded max-h-56 overflow-auto whitespace-pre-wrap">
-{lastFileTextPreview || "No preview captured yet. Upload a PDF again."}
-          </pre>
-        </div>
-      </details>
     </div>
   );
 }

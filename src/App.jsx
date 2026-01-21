@@ -2,6 +2,8 @@ import React, { useMemo, useState } from "react";
 import COAUploader from "./components/COAUploader";
 import ProductCard from "./components/ProductCard";
 import SessionModal from "./components/SessionModal";
+import Blender from "./components/Blender";
+import ManualInput from "./components/ManualInput";
 import { useMmetStore } from "./store/mmetStore";
 import { calculateBaselineScores, calculatePersonalizedScores, DIMS } from "./utils/scoring";
 
@@ -17,156 +19,283 @@ function downloadText(filename, text) {
   URL.revokeObjectURL(url);
 }
 
-export default function App() {
-  const { products, sessionLog, addSessionEntry, exportProfileJson, importProfileJson } = useMmetStore();
+// Color-coded dimension labels
+const DIM_CONFIG = {
+  pain: { label: "Pain Relief", color: "bg-red-500", textColor: "text-red-600", barColor: "bg-red-500", lightBg: "bg-red-100" },
+  head: { label: "Head Effect", color: "bg-purple-500", textColor: "text-purple-600", barColor: "bg-purple-500", lightBg: "bg-purple-100" },
+  couch: { label: "Couch Lock", color: "bg-orange-500", textColor: "text-orange-600", barColor: "bg-orange-500", lightBg: "bg-orange-100" },
+  clarity: { label: "Clarity", color: "bg-blue-500", textColor: "text-blue-600", barColor: "bg-blue-500", lightBg: "bg-blue-100" },
+  duration: { label: "Duration", color: "bg-green-500", textColor: "text-green-600", barColor: "bg-green-500", lightBg: "bg-green-100" },
+  functionality: { label: "Functionality", color: "bg-teal-500", textColor: "text-teal-600", barColor: "bg-teal-500", lightBg: "bg-teal-100" },
+  anxiety: { label: "Anxiety Risk", color: "bg-yellow-500", textColor: "text-yellow-600", barColor: "bg-yellow-500", lightBg: "bg-yellow-100" },
+};
 
-  const [mode, setMode] = useState("baseline"); // baseline | personalized
-  const [logOpen, setLogOpen] = useState(false);
+export default function App() {
+  const { products, sessionLog, addSessionEntry, addProduct, removeProduct, exportProfileJson, importProfileJson } = useMmetStore();
+
+  const [mode, setMode] = useState("baseline");
+  const [sortBy, setSortBy] = useState(null);
+  const [activeTab, setActiveTab] = useState("upload");
   const [activeProductId, setActiveProductId] = useState(null);
 
   const scoresById = useMemo(() => {
     const out = {};
     for (const p of products) {
-      const baseline = calculateBaselineScores(p);
-      out[p.id] = mode === "personalized"
-        ? calculatePersonalizedScores(baseline, sessionLog, p.id)
-        : baseline;
+      if (p.customScores) {
+        out[p.id] = p.customScores;
+      } else {
+        const baseline = calculateBaselineScores(p);
+        out[p.id] = mode === "personalized" 
+          ? calculatePersonalizedScores(baseline, sessionLog, p.id, products)
+          : baseline;
+      }
     }
     return out;
   }, [products, sessionLog, mode]);
 
-  const activeProduct = useMemo(() => {
-    if (!activeProductId) return products[0] || null;
-    return products.find((p) => p.id === activeProductId) || products[0] || null;
-  }, [products, activeProductId]);
+  const sortedProducts = useMemo(() => {
+    if (!sortBy) return products;
+    
+    return [...products].sort((a, b) => {
+      const scoreA = scoresById[a.id]?.[sortBy] || 0;
+      const scoreB = scoresById[b.id]?.[sortBy] || 0;
+      return scoreB - scoreA;
+    });
+  }, [products, scoresById, sortBy]);
 
-  function openLog(productId) {
-    setActiveProductId(productId);
-    setLogOpen(true);
-  }
+  const handleExport = () => {
+    const json = exportProfileJson();
+    const filename = `mmet-profile-${new Date().toISOString().split("T")[0]}.json`;
+    downloadText(filename, json);
+  };
 
-  function saveLog(vals, notes) {
-    if (!activeProduct) return;
-    addSessionEntry({ productId: activeProduct.id, actuals: vals, notes });
-    setLogOpen(false);
-  }
-
-  async function onImportFile(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const txt = await f.text();
-    importProfileJson(txt);
+  const handleImport = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        importProfileJson(evt.target?.result);
+        alert("Profile imported successfully!");
+      } catch (err) {
+        alert("Failed to import profile: " + err.message);
+      }
+    };
+    reader.readAsText(file);
     e.target.value = "";
-  }
+  };
 
-  const modeLabel = mode === "personalized"
-    ? "Personalized (baseline adjusted by your history)"
-    : "Baseline (from COA terpenes)";
+  const handleCreateManualProduct = (product) => {
+    addProduct(product);
+    alert("✓ Product added successfully!");
+  };
+
+  const handleCreateBlend = (blend) => {
+    addProduct(blend);
+    alert("✓ Blend saved to products!");
+    setActiveTab("upload");
+  };
+
+  const handleRemoveProduct = (productId) => {
+    removeProduct(productId);
+  };
+
+  const handleLogSession = (productId) => {
+    setActiveProductId(productId);
+  };
+
+  const handleSaveSession = (data) => {
+    addSessionEntry(data);
+    setActiveProductId(null);
+  };
+
+  const activeProduct = activeProductId ? products.find(p => p.id === activeProductId) : null;
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto p-4 md:p-6">
-        <div className="flex items-start justify-between gap-3 flex-wrap">
-          <div>
-            <div className="text-2xl font-bold">MMET</div>
-            <div className="text-sm text-gray-600">COA → baseline • After-use ratings → personalized calibration • Export/import profile</div>
+    <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50">
+      {/* Header */}
+      <header className="bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg">
+        <div className="container mx-auto px-4 py-6">
+          <div className="flex items-center gap-4">
+            {/* Medical Cross + Leaf Logo */}
+            <div className="relative w-16 h-16 flex-shrink-0">
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-8 h-16 bg-white rounded-md opacity-90"></div>
+                <div className="absolute w-16 h-8 bg-white rounded-md opacity-90"></div>
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center text-4xl">
+                🌿
+              </div>
+            </div>
+            <div>
+              <h1 className="text-3xl font-bold">MMET Predictor</h1>
+              <p className="text-green-100 text-sm">COA → baseline • After-use ratings → personalized calibration • Export/import profile</p>
+            </div>
           </div>
+        </div>
+      </header>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex rounded-xl overflow-hidden border border-gray-200 bg-white">
+      <div className="container mx-auto px-4 py-8">
+        {/* Mode Toggle + Export/Import */}
+        <div className="bg-white rounded-xl shadow-md p-4 mb-6">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
               <button
                 onClick={() => setMode("baseline")}
-                className={`px-3 py-2 text-sm ${mode === "baseline" ? "bg-gray-900 text-white" : "bg-white text-gray-700"}`}
+                className={`px-6 py-2 rounded-lg font-semibold transition-all ${
+                  mode === "baseline"
+                    ? "bg-green-600 text-white shadow-md"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
               >
                 Baseline
               </button>
               <button
                 onClick={() => setMode("personalized")}
-                className={`px-3 py-2 text-sm ${mode === "personalized" ? "bg-gray-900 text-white" : "bg-white text-gray-700"}`}
+                className={`px-6 py-2 rounded-lg font-semibold transition-all ${
+                  mode === "personalized"
+                    ? "bg-green-600 text-white shadow-md"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
               >
-                Personalized
+                Personalized {sessionLog.length > 0 && `(${sessionLog.length})`}
               </button>
             </div>
 
-            <button
-              onClick={() => downloadText(`mmet-profile-${new Date().toISOString().slice(0,10)}.json`, exportProfileJson())}
-              className="px-3 py-2 rounded-xl bg-white border border-gray-200 hover:bg-gray-100 text-sm"
-            >
-              Export Profile (JSON)
-            </button>
+            <div className="flex-1" />
 
-            <label className="px-3 py-2 rounded-xl bg-white border border-gray-200 hover:bg-gray-100 text-sm cursor-pointer">
-              Import Profile
-              <input type="file" accept=".json,application/json" className="hidden" onChange={onImportFile} />
+            <button
+              onClick={handleExport}
+              disabled={products.length === 0}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white rounded-lg font-semibold transition-colors"
+            >
+              📥 Export Profile
+            </button>
+            
+            <label className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold cursor-pointer transition-colors">
+              📤 Import Profile
+              <input type="file" accept=".json" onChange={handleImport} className="hidden" />
             </label>
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-1">
-            <COAUploader />
-
-            <div className="mt-4 bg-white rounded-2xl shadow p-4 border border-gray-100">
-              <div className="text-sm font-semibold">Session History</div>
-              <div className="mt-1 text-xs text-gray-600">
-                Sessions logged: <span className="font-semibold">{sessionLog.length}</span>
-              </div>
-
-              <div className="mt-3 max-h-64 overflow-auto space-y-2">
-                {sessionLog.slice(0, 12).map((s) => (
-                  <div key={s.id} className="p-2 rounded-lg border border-gray-200 bg-gray-50">
-                    <div className="text-xs font-semibold">
-                      {new Date(s.at).toLocaleString()}
-                    </div>
-                    <div className="text-[11px] text-gray-700">
-                      Product: {products.find(p => p.id === s.productId)?.name || s.productId}
-                    </div>
-                    <div className="mt-1 text-[11px] text-gray-700 grid grid-cols-2 gap-x-2">
-                      {DIMS.map((d) => (
-                        <div key={d} className="flex justify-between">
-                          <span>{d}</span>
-                          <span className="font-mono">{Number(s.actuals?.[d] ?? 0).toFixed(1)}</span>
-                        </div>
-                      ))}
-                    </div>
-                    {s.notes ? <div className="mt-1 text-[11px] text-gray-600">{s.notes}</div> : null}
-                  </div>
-                ))}
-                {sessionLog.length === 0 && (
-                  <div className="text-xs text-gray-600">No sessions yet. Use “Log Session (After Use)” on a product.</div>
-                )}
-              </div>
-            </div>
+        {/* Sorting Pills - COLOR CODED */}
+        <div className="bg-white rounded-xl shadow-md p-4 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-semibold text-gray-700">🔀 Sort by:</span>
+            <button
+              onClick={() => setSortBy(null)}
+              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                sortBy === null
+                  ? "bg-gray-700 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              Newest First
+            </button>
           </div>
+          
+          <div className="flex flex-wrap gap-2">
+            {DIMS.map((dim) => {
+              const config = DIM_CONFIG[dim];
+              return (
+                <button
+                  key={dim}
+                  onClick={() => setSortBy(dim)}
+                  className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
+                    sortBy === dim
+                      ? `${config.color} text-white shadow-md`
+                      : `${config.lightBg} ${config.textColor} hover:${config.color} hover:text-white`
+                  }`}
+                >
+                  {config.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
-          <div className="lg:col-span-2">
-            <div className="text-sm font-semibold text-gray-700 mb-2">{modeLabel}</div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {products.map((p) => (
+        {/* Tabs */}
+        <div className="bg-white rounded-xl shadow-md p-2 mb-6">
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveTab("upload")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "upload"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              📤 Upload COA
+            </button>
+            <button
+              onClick={() => setActiveTab("manual")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "manual"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              ✍️ Manual Entry
+            </button>
+            <button
+              onClick={() => setActiveTab("blend")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "blend"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              🌪️ Blend Products
+            </button>
+          </div>
+        </div>
+
+        {/* Tab Content */}
+        <div className="mb-8">
+          {activeTab === "upload" && <COAUploader />}
+          {activeTab === "manual" && <ManualInput onCreateProduct={handleCreateManualProduct} />}
+          {activeTab === "blend" && <Blender products={products} onCreateBlend={handleCreateBlend} />}
+        </div>
+
+        {/* Products Grid */}
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800 mb-4">
+            Products ({products.length})
+            {sortBy && <span className="text-lg font-normal text-gray-600 ml-2">- Sorted by {DIM_CONFIG[sortBy].label}</span>}
+          </h2>
+          
+          {sortedProducts.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-md p-12 text-center">
+              <div className="text-6xl mb-4">🍃</div>
+              <p className="text-gray-600">No products yet. Upload a COA, enter manually, or create a blend!</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {sortedProducts.map((p) => (
                 <ProductCard
                   key={p.id}
                   product={p}
                   scores={scoresById[p.id]}
-                  modeLabel={modeLabel}
-                  onLog={() => openLog(p.id)}
+                  dimConfig={DIM_CONFIG}
+                  modeLabel={mode === "baseline" ? "Baseline (from COA terpenes)" : "Personalized (baseline adjusted by your history)"}
+                  onLog={() => handleLogSession(p.id)}
+                  onRemove={handleRemoveProduct}
                 />
               ))}
-              {products.length === 0 && (
-                <div className="bg-white rounded-2xl shadow p-6 border border-gray-100 text-gray-700">
-                  Upload a COA PDF to create your first product.
-                </div>
-              )}
             </div>
-          </div>
+          )}
         </div>
       </div>
 
-      <SessionModal
-        open={logOpen}
-        onClose={() => setLogOpen(false)}
-        onSave={saveLog}
-        productName={activeProduct?.name}
-      />
+      {/* Session Modal */}
+      {activeProduct && (
+        <SessionModal
+          product={activeProduct}
+          onClose={() => setActiveProductId(null)}
+          onSave={handleSaveSession}
+        />
+      )}
     </div>
   );
 }

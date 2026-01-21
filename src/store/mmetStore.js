@@ -218,6 +218,26 @@ export const useMmetStore = create(
           }
         },
 
+
+        addProduct: (product) => {
+          const newProduct = {
+            ...product,
+            id: product.id || uuid(),
+            createdAt: product.createdAt || new Date().toISOString(),
+          };
+          set((state) => ({
+            products: [newProduct, ...state.products],
+            lastError: null,
+          }));
+          return newProduct;
+        },
+
+        removeProduct: (productId) => {
+          set((state) => ({
+            products: state.products.filter(p => p.id !== productId),
+            lastError: null,
+          }));
+        },
         handleCoaFiles: async (files) => {
           const fileArr = Array.from(files || []);
           if (fileArr.length === 0) return { added: 0, errors: [] };

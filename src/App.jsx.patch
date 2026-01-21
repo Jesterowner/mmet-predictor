@@ -1,0 +1,9 @@
+Find this line in App.jsx:
+        out[p.id] = mode === "personalized" 
+          ? calculatePersonalizedScores(baseline, sessionLog, p.id)
+          : baseline;
+
+Replace with:
+        out[p.id] = mode === "personalized" 
+          ? calculatePersonalizedScores(baseline, sessionLog, p.id, products)
+          : baseline;
