@@ -4,10 +4,10 @@ import { devtools, persist } from "zustand/middleware";
 import * as pdfjsLib from "pdfjs-dist";
 import { normalizeTerpName, getTop6Terpenes, roundPct } from "../utils/terpenes";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).toString();
+// Configure PDF worker for production
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+}
 
 const uuid = () => {
   try { return crypto.randomUUID(); }
@@ -29,21 +29,44 @@ function firstNonEmptyLine(text) {
 
 function extractProductName(text) {
   const t = String(text || "");
-  let m = t.match(/(HAZE[\sA-Z0-9#-]+\([IHS]\)[^\n]{0,80}\b\d+(?:\.\d+)?\s*g\b)/i);
+  
+  // Try Trulieve format: "Product Name: Roll One - Sativa Crmbl"
+  let m = t.match(/Product\s*Name:\s*([^\n]+)/i);
   if (m) return m[1].trim();
-  m = t.match(/Product\s*Name:\s*([^\n]+)/i);
+  
+  // Try cultivar: "Cultivar: Dream Queen"
+  m = t.match(/Cultivar:\s*([^\n]+)/i);
+  if (m) {
+    const cultivar = m[1].trim();
+    // Try to add form if available
+    const formMatch = t.match(/Sample\s*Matrix:\s*([^\n]+)/i);
+    if (formMatch) {
+      return `${cultivar} ${formMatch[1].trim()}`;
+    }
+    return cultivar;
+  }
+  
+  // Try HAZE format
+  m = t.match(/(HAZE[\sA-Z0-9#-]+\([IHS]\)[^\n]{0,80}\b\d+(?:\.\d+)?\s*g\b)/i);
   if (m) return m[1].trim();
+  
   return firstNonEmptyLine(t);
 }
 
 function extractForm(text) {
   const t = String(text || "");
-  let m = t.match(/Form:\s*([^\n]+)/i);
+  
+  // Try "Sample Matrix: Crumble"
+  let m = t.match(/Sample\s*Matrix:\s*([^\n]+)/i);
+  if (m) return m[1].trim();
+  
+  // Try "Form: Live Badder"
+  m = t.match(/Form:\s*([^\n]+)/i);
   if (m) return m[1].trim();
 
   const formTypes = [
     "Live Badder","Live Rosin","Live Sugar","Live Resin","Live Sauce",
-    "Diamonds","Flower","Cart","Vape","Wax","Jam","Extract"
+    "Diamonds","Flower","Cart","Vape","Wax","Jam","Extract","Crumble"
   ];
   for (const ft of formTypes) if (new RegExp(ft, "i").test(t)) return ft;
   return null;
@@ -51,85 +74,92 @@ function extractForm(text) {
 
 function extractTotalTHC(text) {
   const t = String(text || "");
-
-  let m = t.match(/Total\s*THC[\s\S]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  
+  // Format 1: "Total THC: 82.1%"
+  let m = t.match(/Total\s+THC[:\s]+([0-9.]+)\s*%/i);
   if (m) return toNumber(m[1]);
-
-  m = t.match(/Total\s*THC[\s\S]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*mg\s*\/\s*g/i);
-  if (m) {
-    const mgPerG = toNumber(m[1]);
-    if (mgPerG != null) return roundPct(mgPerG / 10);
-  }
-
-  const mUnit = t.match(/Total\s*THC\s*\/\s*Unit\s*([0-9]+(?:\.[0-9]+)?)\s*mg/i);
-  const mGUnit = t.match(/Product\s*g\s*\/\s*unit\s*:?\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if (mUnit) {
-    const thcMg = toNumber(mUnit[1]);
-    const gUnit = mGUnit ? toNumber(mGUnit[1]) : 1.0;
-    if (thcMg != null && gUnit != null && gUnit > 0) return roundPct((thcMg / gUnit) / 10);
-  }
-
+  
+  // Format 2: "Total THC\n82.1% (821 mg)"
+  m = t.match(/Total\s+THC[\s\n]+([0-9.]+)%/i);
+  if (m) return toNumber(m[1]);
+  
   return null;
 }
 
 function extractTotalTerpenes(text) {
   const t = String(text || "");
-  let m = t.match(/Total\s*Terpenes[\s:]+([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  
+  // Format 1: "Total Terpenes: 3.78%"
+  let m = t.match(/Total\s+Terpenes[:\s]+([0-9.]+)\s*%/i);
   if (m) return toNumber(m[1]);
-  m = t.match(/Total[\s\n]*Terpenes[\s\n]*([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  
+  // Format 2: "3.78%\nTotal Terpenes"
+  m = t.match(/([0-9.]+)%[\s\n]+Total\s+Terpenes/i);
   if (m) return toNumber(m[1]);
+  
   return null;
 }
 
+/**
+ * ENHANCED: Extract terpenes in MULTIPLE formats
+ * Handles both "name percentage" and "name number" (no % sign)
+ */
 function extractTerpenePairs(text) {
   const t = String(text || "");
   const pairs = [];
   const seen = new Set();
-
-  const add = (name, pct) => {
-    const key = String(name || "").trim().toLowerCase();
-    if (!key) return;
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 50) return;
-    if (seen.has(key)) return;
-    pairs.push({ name: String(name).trim(), pct });
-    seen.add(key);
-  };
-
-  const up = t.toUpperCase();
-  const sIdx = up.indexOf("TERPENES SUMMARY");
-  if (sIdx >= 0) {
-    const tail = t.slice(sIdx);
-    const stop = tail.match(/(Total\s+Terpenes\s*:|Showing\s+top|POTENCY\s+SUMMARY|MYCOTOXINS|MICROBIALS|PESTICIDES|RESIDUAL\s+SOLVENTS|HEAVY\s+METALS|Order\s*#|Certificate\s+of\s+Analysis)/i);
-    const block = stop ? tail.slice(0, stop.index) : tail;
-
-    const re = /([A-Za-z][A-Za-z\-]*(?:\s+[A-Za-z][A-Za-z\-]*)*)\s+([0-9]+\.[0-9]+)\s+([0-9]{2,6})/g;
-    for (const m of block.matchAll(re)) {
-      const name = m[1].trim();
-      if (/Analyte|Result|ug\/g|SUMMARY/i.test(name)) continue;
-      const pct = toNumber(m[2]);
-      if (pct != null) add(name, pct);
+  
+  // Find TERPENES section
+  const terpMatch = t.match(/TERPENES[\s\S]+?(?=POTENCY|ANALYSIS|Copyright|Page|$)/i);
+  const terpSection = terpMatch ? terpMatch[0] : t;
+  
+  const lines = terpSection.split(/\r?\n/);
+  
+  for (const line of lines) {
+    // Skip headers
+    if (line.match(/Analyte|Result|Top Ten|Total Terpenes|SUMMARY/i)) continue;
+    
+    // Pattern 1: "beta-Caryophyllene 1.77" (NO percent sign)
+    let match = line.match(/^([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)(?:\s|$)/);
+    if (match) {
+      const name = match[1].trim();
+      const pct = parseFloat(match[2]);
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key)) {
+        pairs.push({ name, pct });
+        seen.add(key);
+        continue;
+      }
+    }
+    
+    // Pattern 2: "Caryophyllene 2.26%" (WITH percent sign)
+    match = line.match(/([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
+    if (match) {
+      const name = match[1].trim();
+      const pct = parseFloat(match[2]);
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key)) {
+        pairs.push({ name, pct });
+        seen.add(key);
+      }
     }
   }
-
-  for (const m of t.matchAll(/([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+(?:\.[0-9]+)?)\s*%/g)) {
-    const name = m[1].trim();
-    if (/Total\s+Terpenes/i.test(name)) continue;
-    const pct = toNumber(m[2]);
-    if (pct != null) add(name, pct);
-  }
-
+  
   return pairs;
 }
 
 function normalizeAndCombineTerps(pairs) {
   const map = new Map();
-  for (const tt of pairs || []) {
-    const name = normalizeTerpName(tt.name);
-    const pct = Number(tt.pct);
+  for (const t of pairs) {
+    const name = normalizeTerpName(t.name);
+    const pct = Number(t.pct);
     if (!name) continue;
     if (!Number.isFinite(pct) || pct <= 0) continue;
     map.set(name, (map.get(name) || 0) + pct);
   }
+
   return Array.from(map.entries())
     .map(([name, pct]) => ({ name, pct: roundPct(pct) }))
     .sort((a, b) => b.pct - a.pct);
@@ -143,22 +173,30 @@ function parseCoaTextToProduct(coaText, meta = {}) {
   const form = extractForm(text);
   const totalTHC = extractTotalTHC(text);
   const totalTerpenes = extractTotalTerpenes(text);
-
-  if (totalTHC == null) return null;
+  
+  if (!totalTHC) {
+    console.warn('No THC found in COA:', name);
+    return null;
+  }
 
   const rawPairs = extractTerpenePairs(text);
-  const terpenes = normalizeAndCombineTerps(rawPairs);
-  const top6 = getTop6Terpenes(terpenes);
+  const normalizedTerpenes = normalizeAndCombineTerps(rawPairs);
+  const top6 = getTop6Terpenes(normalizedTerpenes);
 
   return {
     id: uuid(),
     name,
     form,
-    metrics: { totalTHC, totalTerpenes },
-    terpenes,
+    metrics: {
+      totalTHC,
+      totalTerpenes,
+      totalCannabinoids: null,
+      thcPerUnitMg: null,
+    },
+    terpenes: normalizedTerpenes,
     top6,
     coa: {
-      rawText: text.length > 5000 ? text.slice(0, 5000) + "..." : text,
+      rawText: text.length > 5000 ? text.substring(0, 5000) + '...' : text,
       sourceFileName: meta.sourceFileName || null,
       parsedAt: new Date().toISOString(),
     },
@@ -169,22 +207,32 @@ function parseCoaTextToProduct(coaText, meta = {}) {
 async function readFileAsText(file) {
   const name = (file?.name || "").toLowerCase();
 
-  if (name.endsWith(".txt") || name.endsWith(".csv") || file?.type?.startsWith("text/")) {
+  if (
+    name.endsWith(".txt") ||
+    name.endsWith(".csv") ||
+    name.endsWith(".md") ||
+    file?.type?.startsWith("text/")
+  ) {
     return await file.text();
   }
 
   if (name.endsWith(".pdf") || file?.type === "application/pdf") {
-    const data = new Uint8Array(await file.arrayBuffer());
-    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      const pdf = await pdfjsLib.getDocument({ data }).promise;
 
-    let out = "";
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p);
-      const content = await page.getTextContent();
-      const items = content.items.map((it) => it.str);
-      out += items.join(" ") + "\n\n";
+      let out = "";
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        const items = content.items.map((it) => it.str);
+        out += items.join(" ") + "\n\n";
+      }
+      return out.trim();
+    } catch (err) {
+      console.error('PDF parsing error:', err);
+      throw new Error(`PDF parsing failed: ${err.message}`);
     }
-    return out.trim();
   }
 
   throw new Error(`Unsupported file type: ${file?.name || "unknown"}`);
@@ -197,14 +245,10 @@ export const useMmetStore = create(
         products: [],
         sessionLog: [],
         profileName: "Default",
+        scoreMode: "standard",
+        scoreSource: "coa",
         lastError: null,
-
-        // debug
-        lastFileName: null,
-        lastFileTextPreview: null,
-        lastTerpeneProbe: null,
-
-        clearProducts: () => set({ products: [], lastError: null }),
+        lastParseAt: null,
 
         parseCoaText: (coaText, meta = {}) => {
           try {
@@ -217,7 +261,6 @@ export const useMmetStore = create(
             return null;
           }
         },
-
 
         addProduct: (product) => {
           const newProduct = {
@@ -238,6 +281,7 @@ export const useMmetStore = create(
             lastError: null,
           }));
         },
+
         handleCoaFiles: async (files) => {
           const fileArr = Array.from(files || []);
           if (fileArr.length === 0) return { added: 0, errors: [] };
@@ -248,17 +292,6 @@ export const useMmetStore = create(
           for (const f of fileArr) {
             try {
               const text = await readFileAsText(f);
-
-              const upper = String(text || "").toUpperCase();
-              const idx = upper.indexOf("TERPEN");
-              const probe = idx >= 0 ? String(text || "").slice(Math.max(0, idx - 200), idx + 1200) : null;
-
-              set({
-                lastFileName: f.name,
-                lastFileTextPreview: String(text || "").slice(0, 4000),
-                lastTerpeneProbe: probe,
-              });
-
               const result = get().parseCoaText(text, { sourceFileName: f.name });
               if (result) added += Array.isArray(result) ? result.length : 1;
             } catch (e) {
@@ -270,32 +303,6 @@ export const useMmetStore = create(
           return { added, errors };
         },
 
-        applyTerpenePaste: ({ productId, terpText } = {}) => {
-          if (!productId) { set({ lastError: "applyTerpenePaste requires productId" }); return false; }
-          const raw = String(terpText || "").trim();
-          if (!raw) { set({ lastError: "No terp text provided" }); return false; }
-
-          const rawPairs = extractTerpenePairs(raw);
-          const terpenes = normalizeAndCombineTerps(rawPairs);
-          const top6 = getTop6Terpenes(terpenes);
-
-          set((state) => ({
-            products: state.products.map((p) => {
-              if (p.id !== productId) return p;
-              const metrics = { ...(p.metrics || {}) };
-              if (!metrics.totalTerpenes || metrics.totalTerpenes === 0) {
-                const sum = terpenes.reduce((a, t) => a + (Number(t.pct) || 0), 0);
-                metrics.totalTerpenes = roundPct(sum);
-              }
-              return { ...p, metrics, terpenes, top6 };
-            }),
-            lastError: null,
-          }));
-
-          return true;
-        },
-
-        // After-use rating log (this is your calibration loop)
         addSessionEntry: ({ productId, actuals, notes } = {}) => {
           if (!productId) { set({ lastError: "addSessionEntry requires productId" }); return false; }
           const entry = {
@@ -309,7 +316,6 @@ export const useMmetStore = create(
           return true;
         },
 
-        // Profile export/import (upload before each use)
         exportProfileJson: () => {
           const s = get();
           const payload = {
