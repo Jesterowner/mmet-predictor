@@ -1,12 +1,13 @@
+import { extractTextFromPdfFile } from "../utils/pdfText";
+import { parseCoaPdf } from "../utils/coaPdfParser";
+import { normalizePdfCoaToStandard } from "../utils/coaNormalize";
 // src/store/mmetStore.js
 import { create } from "zustand";
 import { devtools, persist } from "zustand/middleware";
-import * as pdfjsLib from "pdfjs-dist";
 import { normalizeTerpName, getTop6Terpenes, roundPct } from "../utils/terpenes";
 
 // Configure PDF worker for production
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@5.4.530/build/pdf.worker.min.mjs';
 }
 
 const uuid = () => {
@@ -74,42 +75,64 @@ function extractForm(text) {
 
 function extractTotalTHC(text) {
   const t = String(text || "");
-  
-  // Format 1: "Total THC: 82.1%"
+
+  // Preferred: explicit Total THC %
   let m = t.match(/Total\s+THC[:\s]+([0-9.]+)\s*%/i);
   if (m) return toNumber(m[1]);
-  
-  // Format 2: "Total THC\n82.1% (821 mg)"
-  m = t.match(/Total\s+THC[\s\n]+([0-9.]+)%/i);
+
+  // Alternate: "Total THC\n82.1% (821 mg)"
+  m = t.match(/Total\s+THC[\s\n]+([0-9.]+)\s*%/i);
   if (m) return toNumber(m[1]);
-  
+
+  // Fallback: compute Total THC from THCa and Delta-9 when only components are listed
+  // Total THC = Δ9 THC + (THCa * 0.877)
+  const thcaMatch =
+    t.match(/\bTHCa\b[:\s]+([0-9.]+)\s*%/i) ||
+    t.match(/\bTHC-A\b[:\s]+([0-9.]+)\s*%/i);
+
+  const d9Match =
+    t.match(/\b(Delta[-\s]*9\s*THC|Δ9\s*THC|D9\s*THC)\b[:\s]+([0-9.]+)\s*%/i) ||
+    t.match(/\bDelta\s*9\b[\s\S]{0,30}?([0-9.]+)\s*%/i);
+
+  const thca = thcaMatch ? toNumber(thcaMatch[1]) : null;
+  const d9 = d9Match ? toNumber(d9Match[d9Match.length - 1]) : null;
+
+  if (thca != null || d9 != null) {
+    const total = (d9 || 0) + ((thca || 0) * 0.877);
+    if (total > 0) return roundPct(total);
+  }
+
   return null;
 }
 
 function extractTotalTerpenes(text) {
   const t = String(text || "");
-  
+
   // Format 1: "Total Terpenes: 3.78%"
   let m = t.match(/Total\s+Terpenes[:\s]+([0-9.]+)\s*%/i);
   if (m) return toNumber(m[1]);
-  
+
   // Format 2: "3.78%\nTotal Terpenes"
   m = t.match(/([0-9.]+)%[\s\n]+Total\s+Terpenes/i);
   if (m) return toNumber(m[1]);
-  
+
+  // Format 3: "Total Terpenes 80.9 mg/g" (convert mg/g -> % by /10)
+  m = t.match(/Total\s+Terpenes[:\s]+([0-9.]+)\s*(mg\/g|mg\s*\/\s*g)/i);
+  if (m) return roundPct(toNumber(m[1]) / 10);
+
+  // Format 4: "Total Terpenes 809.00" (unit missing; normalize to plausible %)
+  m = t.match(/Total\s+Terpenes[:\s]+([0-9.]+)(?:\s|$)/i);
+  if (m) {
+    const v = toNumber(m[1]);
+    if (v == null) return null;
+    if (v > 300) return roundPct(v / 100);
+    if (v > 30) return roundPct(v / 10);
+    if (v > 0) return roundPct(v);
+  }
+
   return null;
 }
 
-/**
- * ENHANCED: Extract terpenes in MULTIPLE formats
- * Handles both "name percentage" and "name number" (no % sign)
- */
-/**
- * UNIVERSAL terpene parser - handles ALL COA formats:
- * 1. "beta-Caryophyllene 1.77" (name then %)
- * 2. "1.77 beta-Caryophyllene" (% then name)
- * 3. "D-Limonene 22300 2.230" (name, ug/g, then %)
- */
 function extractTerpenePairs(text) {
   const t = String(text || "");
   const pairs = [];
@@ -122,111 +145,37 @@ function extractTerpenePairs(text) {
   const lines = terpSection.split(/\r?\n/);
   
   for (const line of lines) {
-    // Skip headers and totals
-    if (line.match(/Analyte|Result|ug\/g|Top Ten|Total Terpenes|SUMMARY|Showing/i)) continue;
+    // Skip headers
+    if (line.match(/Analyte|Result|Top Ten|Total Terpenes|SUMMARY/i)) continue;
     
-    // Clean line
-    const cleaned = line.trim();
-    if (!cleaned || cleaned.length < 3) continue;
-    
-    // Pattern 1: "beta-Caryophyllene 1.77" (NAME space NUMBER)
-    let match = cleaned.match(/^([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)$/);
+    // Pattern 1: "beta-Caryophyllene 1.77" (NO percent sign)
+    let match = line.match(/^([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)(?:\s|$)/);
     if (match) {
       const name = match[1].trim();
       const pct = parseFloat(match[2]);
       const key = name.toLowerCase().replace(/[^a-z]/g, '');
       
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+      if (pct > 0 && pct < 50 && !seen.has(key)) {
         pairs.push({ name, pct });
         seen.add(key);
         continue;
       }
     }
     
-    // Pattern 2: "D-Limonene 22300 2.230" (NAME space UG/G space %)
-    match = cleaned.match(/^([A-Za-z][\w\-\s]+?)\s+[0-9]+\s+([0-9]+\.[0-9]+)$/);
+    // Pattern 2: "Caryophyllene 2.26%" (WITH percent sign)
+    match = line.match(/([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
     if (match) {
       const name = match[1].trim();
       const pct = parseFloat(match[2]);
       const key = name.toLowerCase().replace(/[^a-z]/g, '');
       
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
-        pairs.push({ name, pct });
-        seen.add(key);
-        continue;
-      }
-    }
-    
-    // Pattern 3: "1.77 beta-Caryophyllene" (NUMBER space NAME) - REVERSED
-    match = cleaned.match(/^([0-9]+\.[0-9]+)\s+([A-Za-z][\w\-\s]+?)$/);
-    if (match) {
-      const pct = parseFloat(match[1]);
-      const name = match[2].trim();
-      const key = name.toLowerCase().replace(/[^a-z]/g, '');
-      
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
-        pairs.push({ name, pct });
-        seen.add(key);
-        continue;
-      }
-    }
-    
-    // Pattern 4: "Caryophyllene 2.26%" (with percent sign)
-    match = cleaned.match(/([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
-    if (match) {
-      const name = match[1].trim();
-      const pct = parseFloat(match[2]);
-      const key = name.toLowerCase().replace(/[^a-z]/g, '');
-      
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+      if (pct > 0 && pct < 50 && !seen.has(key)) {
         pairs.push({ name, pct });
         seen.add(key);
       }
     }
   }
   
-  return pairs;
-}
-      const pct = parseFloat(match[2]);
-      const key = name.toLowerCase().replace(/[^a-z]/g, '');
-      
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
-        pairs.push({ name, pct });
-        seen.add(key);
-        continue;
-      }
-    }
-    
-    // Pattern 3: "1.77 beta-Caryophyllene" (NUMBER space NAME) - REVERSED
-    match = cleaned.match(/^([0-9]+\.[0-9]+)\s+([A-Za-z][\w\-\s]+?)$/);
-    if (match) {
-      const pct = parseFloat(match[1]);
-      const name = match[2].trim();
-      const key = name.toLowerCase().replace(/[^a-z]/g, '');
-      
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
-        pairs.push({ name, pct });
-        seen.add(key);
-        continue;
-      }
-    }
-    
-    // Pattern 4: "Caryophyllene 2.26%" (with percent sign)
-    match = cleaned.match(/([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
-    if (match) {
-      const name = match[1].trim();
-      const pct = parseFloat(match[2]);
-      const key = name.toLowerCase().replace(/[^a-z]/g, '');
-      
-      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
-        pairs.push({ name, pct });
-        seen.add(key);
-      }
-    }
-  }
-  
-  return pairs;
-}
   return pairs;
 }
 
@@ -298,24 +247,31 @@ async function readFileAsText(file) {
 
   if (name.endsWith(".pdf") || file?.type === "application/pdf") {
     try {
-      const data = new Uint8Array(await file.arrayBuffer());
-      const pdf = await pdfjsLib.getDocument({ data }).promise;
+      const parsed = await parseCoaPdf(file);
 
-      let out = "";
-      for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p);
-        const content = await page.getTextContent();
-        const items = content.items.map((it) => it.str);
-        out += items.join(" ") + "\n\n";
+
+      const lines = [];
+      lines.push(parsed.displayName || file?.name || "Unknown Product");
+      lines.push(`Form: ${parsed.form || "Concentrate"}`);
+
+      if (typeof parsed.totalTHC === "number") lines.push(`Total THC: ${parsed.totalTHC.toFixed(1)}%`);
+      if (typeof parsed.totalTerpenes === "number") lines.push(`Total Terpenes: ${parsed.totalTerpenes.toFixed(2)}%`);
+
+      if (Array.isArray(parsed.terpenes) && parsed.terpenes.length) {
+        lines.push("Top Terpenes:");
+        for (const tp of parsed.terpenes) {
+          if (!tp?.name || typeof tp.pct !== "number") continue;
+          lines.push(`- ${tp.name} ${tp.pct.toFixed(3)}%`);
+        }
       }
-      return out.trim();
+
+      return lines.join("\n");
     } catch (err) {
-      console.error('PDF parsing error:', err);
-      throw new Error(`PDF parsing failed: ${err.message}`);
+      console.error("PDF parsing error:", err);
+      throw new Error(`PDF parsing failed: ${err?.message || err}`);
     }
   }
-
-  throw new Error(`Unsupported file type: ${file?.name || "unknown"}`);
+throw new Error(`Unsupported file type: ${file?.name || "unknown"}`);
 }
 
 export const useMmetStore = create(
