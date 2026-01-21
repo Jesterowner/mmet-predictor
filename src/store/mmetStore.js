@@ -249,6 +249,78 @@ async function readFileAsText(file) {
     try {
       const parsed = await parseCoaPdf(file);
 
+      // LAB_FIXUPS_V1: Lab-specific PDF normalization for Kaycha + Modern Canna formats.
+      // Fixes: Kaycha total terpenes/terp rows using TESTED %; Modern Canna THC vs cannabinoids and terp rows without '%'.
+      try {
+        const raw = String(parsed?.rawText || "");
+        const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+        // ---- Kaycha Labs (Country Cookies): columns include LOD/LOQ then "TESTED %"
+        const isKaycha =
+          /Kaycha\s+Labs/i.test(raw) ||
+          lines.some(l => /\bTESTED\b/i.test(l) && /TOTAL\s+TERPENES/i.test(l));
+
+        if (isKaycha) {
+          const totalLine = lines.find(l => /TOTAL\s+TERPENES/i.test(l) && /\bTESTED\b/i.test(l));
+          if (totalLine) {
+            const nums = totalLine.match(/[0-9]+(?:\.[0-9]+)?/g) || [];
+            const candidate = nums.length >= 2 ? Number(nums[nums.length - 2]) : null; // RESULT%
+            if (candidate != null && isFinite(candidate) && candidate > 0.1 && candidate < 40) {
+              if (!parsed.totalTerpenes || parsed.totalTerpenes < 0.2) parsed.totalTerpenes = candidate;
+            }
+          }
+
+          const terpRows = [];
+          for (const l of lines) {
+            const m = l.match(/^([A-Z0-9\-\/ ]{3,})\s+[0-9.]+\s+[0-9.]+\s+TESTED\s+([0-9]+(?:\.[0-9]+)?)\s+[0-9]+(?:\.[0-9]+)?$/i);
+            if (!m) continue;
+            const name = m[1].trim();
+            if (/^TOTAL\s+TERPENES$/i.test(name)) continue;
+            const pct = Number(m[2]);
+            if (!isFinite(pct) || pct <= 0 || pct > 40) continue;
+            terpRows.push({ name, pct });
+          }
+          if ((parsed?.terpenes || []).length === 0 && terpRows.length) {
+            parsed.terpenes = terpRows;
+          }
+        }
+
+        // ---- Modern Canna / Trulieve (Dream Queen / Roll One): header row provides 4 values in order
+        const isModern =
+          /Modern\s+Canna|moderncanna\.com/i.test(raw) ||
+          raw.toLowerCase().includes("total cbd total thc total cannabinoids total terpenes");
+
+        if (isModern) {
+          const idx = raw.toLowerCase().indexOf("total cbd total thc total cannabinoids total terpenes");
+          if (idx >= 0) {
+            const slice = raw.slice(idx, idx + 900);
+            const perc = slice.match(/[0-9]+(?:\.[0-9]+)?%/g) || [];
+            if (perc.length >= 4) {
+              const thc = Number(perc[1].replace("%",""));
+              const terps = Number(perc[3].replace("%",""));
+              if (isFinite(thc) && thc > 1 && thc < 110) parsed.totalTHC = thc;
+              if (isFinite(terps) && terps > 0.05 && terps < 40) parsed.totalTerpenes = terps;
+            }
+          }
+
+          if ((parsed?.terpenes || []).length === 0) {
+            const terpRows = [];
+            for (const l of lines) {
+              const m = l.match(/^([A-Za-z][A-Za-z0-9\- ]{2,})\s+([0-9]+(?:\.[0-9]+)?)$/);
+              if (!m) continue;
+              const name = m[1].trim();
+              const pct = Number(m[2]);
+              if (/^(thca|delta|cbg|cbga|cbd|cbda|cbn|thcv|cbc|cbdv|thcva)$/i.test(name)) continue;
+              if (!isFinite(pct) || pct <= 0 || pct > 40) continue;
+              terpRows.push({ name, pct });
+            }
+            if (terpRows.length) parsed.terpenes = terpRows;
+          }
+        }
+      } catch (e) {
+        console.warn("[MMET PDF] lab fixups failed:", e?.message || e);
+      }
+
 
       const lines = [];
       lines.push(parsed.displayName || file?.name || "Unknown Product");
