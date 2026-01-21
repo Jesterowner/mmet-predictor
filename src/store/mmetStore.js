@@ -104,6 +104,12 @@ function extractTotalTerpenes(text) {
  * ENHANCED: Extract terpenes in MULTIPLE formats
  * Handles both "name percentage" and "name number" (no % sign)
  */
+/**
+ * UNIVERSAL terpene parser - handles ALL COA formats:
+ * 1. "beta-Caryophyllene 1.77" (name then %)
+ * 2. "1.77 beta-Caryophyllene" (% then name)
+ * 3. "D-Limonene 22300 2.230" (name, ug/g, then %)
+ */
 function extractTerpenePairs(text) {
   const t = String(text || "");
   const pairs = [];
@@ -116,37 +122,111 @@ function extractTerpenePairs(text) {
   const lines = terpSection.split(/\r?\n/);
   
   for (const line of lines) {
-    // Skip headers
-    if (line.match(/Analyte|Result|Top Ten|Total Terpenes|SUMMARY/i)) continue;
+    // Skip headers and totals
+    if (line.match(/Analyte|Result|ug\/g|Top Ten|Total Terpenes|SUMMARY|Showing/i)) continue;
     
-    // Pattern 1: "beta-Caryophyllene 1.77" (NO percent sign)
-    let match = line.match(/^([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)(?:\s|$)/);
+    // Clean line
+    const cleaned = line.trim();
+    if (!cleaned || cleaned.length < 3) continue;
+    
+    // Pattern 1: "beta-Caryophyllene 1.77" (NAME space NUMBER)
+    let match = cleaned.match(/^([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)$/);
     if (match) {
       const name = match[1].trim();
       const pct = parseFloat(match[2]);
       const key = name.toLowerCase().replace(/[^a-z]/g, '');
       
-      if (pct > 0 && pct < 50 && !seen.has(key)) {
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
         pairs.push({ name, pct });
         seen.add(key);
         continue;
       }
     }
     
-    // Pattern 2: "Caryophyllene 2.26%" (WITH percent sign)
-    match = line.match(/([A-Za-z][A-Za-z0-9\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
+    // Pattern 2: "D-Limonene 22300 2.230" (NAME space UG/G space %)
+    match = cleaned.match(/^([A-Za-z][\w\-\s]+?)\s+[0-9]+\s+([0-9]+\.[0-9]+)$/);
     if (match) {
       const name = match[1].trim();
       const pct = parseFloat(match[2]);
       const key = name.toLowerCase().replace(/[^a-z]/g, '');
       
-      if (pct > 0 && pct < 50 && !seen.has(key)) {
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+        pairs.push({ name, pct });
+        seen.add(key);
+        continue;
+      }
+    }
+    
+    // Pattern 3: "1.77 beta-Caryophyllene" (NUMBER space NAME) - REVERSED
+    match = cleaned.match(/^([0-9]+\.[0-9]+)\s+([A-Za-z][\w\-\s]+?)$/);
+    if (match) {
+      const pct = parseFloat(match[1]);
+      const name = match[2].trim();
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+        pairs.push({ name, pct });
+        seen.add(key);
+        continue;
+      }
+    }
+    
+    // Pattern 4: "Caryophyllene 2.26%" (with percent sign)
+    match = cleaned.match(/([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
+    if (match) {
+      const name = match[1].trim();
+      const pct = parseFloat(match[2]);
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
         pairs.push({ name, pct });
         seen.add(key);
       }
     }
   }
   
+  return pairs;
+}
+      const pct = parseFloat(match[2]);
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+        pairs.push({ name, pct });
+        seen.add(key);
+        continue;
+      }
+    }
+    
+    // Pattern 3: "1.77 beta-Caryophyllene" (NUMBER space NAME) - REVERSED
+    match = cleaned.match(/^([0-9]+\.[0-9]+)\s+([A-Za-z][\w\-\s]+?)$/);
+    if (match) {
+      const pct = parseFloat(match[1]);
+      const name = match[2].trim();
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+        pairs.push({ name, pct });
+        seen.add(key);
+        continue;
+      }
+    }
+    
+    // Pattern 4: "Caryophyllene 2.26%" (with percent sign)
+    match = cleaned.match(/([A-Za-z][\w\-\s]+?)\s+([0-9]+\.[0-9]+)%/);
+    if (match) {
+      const name = match[1].trim();
+      const pct = parseFloat(match[2]);
+      const key = name.toLowerCase().replace(/[^a-z]/g, '');
+      
+      if (pct > 0 && pct < 50 && !seen.has(key) && name.length > 2) {
+        pairs.push({ name, pct });
+        seen.add(key);
+      }
+    }
+  }
+  
+  return pairs;
+}
   return pairs;
 }
 
