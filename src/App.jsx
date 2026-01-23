@@ -32,7 +32,16 @@ const DIM_CONFIG = {
 };
 
 export default function App() {
-  const { products, sessionLog, addSessionEntry, addProduct, removeProduct, exportProfileJson, importProfileJson } = useMmetStore();
+  const {
+    products,
+    sessionLog,
+    addSessionEntry,
+    addProduct,
+    removeProduct,
+    clearProducts,
+    exportProfileJson,
+    importProfileJson,
+  } = useMmetStore();
 
   const [mode, setMode] = useState("baseline");
   const [sortBy, setSortBy] = useState(null);
@@ -46,9 +55,10 @@ export default function App() {
         out[p.id] = p.customScores;
       } else {
         const baseline = calculateBaselineScores(p);
-        out[p.id] = mode === "personalized" 
-          ? calculatePersonalizedScores(baseline, sessionLog, p.id, products)
-          : baseline;
+        out[p.id] =
+          mode === "personalized"
+            ? calculatePersonalizedScores(baseline, sessionLog, p.id, products)
+            : baseline;
       }
     }
     return out;
@@ -56,7 +66,7 @@ export default function App() {
 
   const sortedProducts = useMemo(() => {
     if (!sortBy) return products;
-    
+
     return [...products].sort((a, b) => {
       const scoreA = scoresById[a.id]?.[sortBy] || 0;
       const scoreB = scoresById[b.id]?.[sortBy] || 0;
@@ -110,7 +120,7 @@ export default function App() {
     setActiveProductId(null);
   };
 
-  const activeProduct = activeProductId ? products.find(p => p.id === activeProductId) : null;
+  const activeProduct = activeProductId ? products.find((p) => p.id === activeProductId) : null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50">
@@ -124,13 +134,13 @@ export default function App() {
                 <div className="w-8 h-16 bg-white rounded-md opacity-90"></div>
                 <div className="absolute w-16 h-8 bg-white rounded-md opacity-90"></div>
               </div>
-              <div className="absolute inset-0 flex items-center justify-center text-4xl">
-                🌿
-              </div>
+              <div className="absolute inset-0 flex items-center justify-center text-4xl">🌿</div>
             </div>
             <div>
               <h1 className="text-3xl font-bold">MMET Predictor</h1>
-              <p className="text-green-100 text-sm">COA → baseline • After-use ratings → personalized calibration • Export/import profile</p>
+              <p className="text-green-100 text-sm">
+                COA → baseline • After-use ratings → personalized calibration • Export/import profile
+              </p>
             </div>
           </div>
         </div>
@@ -166,13 +176,24 @@ export default function App() {
             <div className="flex-1" />
 
             <button
+              onClick={() => {
+                const ok = window.confirm("Clear all products? This cannot be undone.");
+                if (ok) clearProducts();
+              }}
+              disabled={products.length === 0}
+              className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-300 text-white rounded-lg font-semibold transition-colors"
+            >
+              🧹 Clear All Products
+            </button>
+
+            <button
               onClick={handleExport}
               disabled={products.length === 0}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white rounded-lg font-semibold transition-colors"
             >
               📥 Export Profile
             </button>
-            
+
             <label className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold cursor-pointer transition-colors">
               📤 Import Profile
               <input type="file" accept=".json" onChange={handleImport} className="hidden" />
@@ -187,15 +208,13 @@ export default function App() {
             <button
               onClick={() => setSortBy(null)}
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                sortBy === null
-                  ? "bg-gray-700 text-white shadow-md"
-                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                sortBy === null ? "bg-gray-700 text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
               }`}
             >
               Newest First
             </button>
           </div>
-          
+
           <div className="flex flex-wrap gap-2">
             {DIMS.map((dim) => {
               const config = DIM_CONFIG[dim];
@@ -263,9 +282,13 @@ export default function App() {
         <div>
           <h2 className="text-2xl font-bold text-gray-800 mb-4">
             Products ({products.length})
-            {sortBy && <span className="text-lg font-normal text-gray-600 ml-2">- Sorted by {DIM_CONFIG[sortBy].label}</span>}
+            {sortBy && (
+              <span className="text-lg font-normal text-gray-600 ml-2">
+                - Sorted by {DIM_CONFIG[sortBy].label}
+              </span>
+            )}
           </h2>
-          
+
           {sortedProducts.length === 0 ? (
             <div className="bg-white rounded-xl shadow-md p-12 text-center">
               <div className="text-6xl mb-4">🍃</div>
@@ -279,7 +302,11 @@ export default function App() {
                   product={p}
                   scores={scoresById[p.id]}
                   dimConfig={DIM_CONFIG}
-                  modeLabel={mode === "baseline" ? "Baseline (from COA terpenes)" : "Personalized (baseline adjusted by your history)"}
+                  modeLabel={
+                    mode === "baseline"
+                      ? "Baseline (from COA terpenes)"
+                      : "Personalized (baseline adjusted by your history)"
+                  }
                   onLog={() => handleLogSession(p.id)}
                   onRemove={handleRemoveProduct}
                 />
@@ -291,11 +318,7 @@ export default function App() {
 
       {/* Session Modal */}
       {activeProduct && (
-        <SessionModal
-          product={activeProduct}
-          onClose={() => setActiveProductId(null)}
-          onSave={handleSaveSession}
-        />
+        <SessionModal product={activeProduct} onClose={() => setActiveProductId(null)} onSave={handleSaveSession} />
       )}
 
       <div className="mt-6 text-xs opacity-60">
