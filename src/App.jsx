@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import { BUILD_INFO } from "./utils/buildInfo";
 import COAUploader from "./components/COAUploader";
 import ProductCard from "./components/ProductCard";
 import SessionModal from "./components/SessionModal";
@@ -296,6 +297,10 @@ export default function App() {
           onSave={handleSaveSession}
         />
       )}
+
+      <div className="mt-6 text-xs opacity-60">
+        Build: {BUILD_INFO.mode} • {BUILD_INFO.commit}
+      </div>
     </div>
   );
 }
