@@ -128,17 +128,15 @@ export default function App() {
       <header className="bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg">
         <div className="container mx-auto px-4 py-6">
           <div className="flex items-center gap-4">
-            {/* Medical Cross + Leaf Logo */}
-            <div className="relative w-16 h-16 flex-shrink-0">
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-8 h-16 bg-white rounded-md opacity-90"></div>
-                <div className="absolute w-16 h-8 bg-white rounded-md opacity-90"></div>
-              </div>
-              <div className="absolute inset-0 flex items-center justify-center text-4xl">🌿</div>
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold">MMET Predictor</h1>
-              <p className="text-green-100 text-sm">
+            {/* Logo placeholder (we’ll drop in the real MMEL hex+leaf mark next) */}
+            <div
+              aria-hidden="true"
+              className="h-12 w-12 rounded-xl border border-white/30 bg-white/10"
+            />
+            <div className="leading-tight">
+              <h1 className="text-3xl font-bold">MMEL</h1>
+              <p className="text-green-100 text-sm">Marijuana Effect Lab</p>
+              <p className="text-green-100/90 text-xs mt-1">
                 COA → baseline • After-use ratings → personalized calibration • Export/import profile
               </p>
             </div>
