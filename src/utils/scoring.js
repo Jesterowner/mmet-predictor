@@ -133,11 +133,20 @@ function applyTerpeneEffects(scores, terpenes, thc) {
   return final;
 }
 
+function softCap(value, cap = 5, knee = 4) {
+  if (value <= knee) return value;
+  const excess = value - knee;
+  const range = cap - knee;
+  // Diminishing returns after the knee (smooth, monotonic, never exceeds cap)
+  return knee + range * (1 - Math.exp(-excess / range));
+}
+
 function roundAndClamp(scores, thc, terpenes) {
   const output = {};
   
   for (const dim of DIMS) {
     let val = scores[dim];
+    if (dim === "pain") val = softCap(val, 5, 4);
     val = Math.round(val * 2) / 2;
     val = Math.max(0, Math.min(5, val));
     output[dim] = val;
