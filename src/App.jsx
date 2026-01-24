@@ -42,6 +42,7 @@ export default function App() {
     clearProducts,
     exportProfileJson,
     importProfileJson,
+    renameProduct, // ✅ ADDED
   } = useMmetStore();
 
   const [mode, setMode] = useState("baseline");
@@ -310,6 +311,7 @@ export default function App() {
                   }
                   onLog={() => handleLogSession(p.id)}
                   onRemove={handleRemoveProduct}
+                  onRename={renameProduct} // ✅ ADDED
                 />
               ))}
             </div>
