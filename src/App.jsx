@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from "react";
+import mmelLogo from "./assets/mmel-logo.png";
 import { BUILD_INFO } from "./utils/buildInfo";
 import COAUploader from "./components/COAUploader";
 import ProductCard from "./components/ProductCard";
@@ -6,12 +7,7 @@ import SessionModal from "./components/SessionModal";
 import Blender from "./components/Blender";
 import ManualInput from "./components/ManualInput";
 import { useMmetStore } from "./store/mmetStore";
-import {
-  calculateBaselineScores,
-  calculatePersonalizedScores,
-  DIMS,
-} from "./utils/scoring";
-import mmelLogo from "./assets/mmel-logo.png";
+import { calculateBaselineScores, calculatePersonalizedScores, DIMS } from "./utils/scoring";
 
 function downloadText(filename, text) {
   const blob = new Blob([text], { type: "application/json" });
@@ -27,55 +23,13 @@ function downloadText(filename, text) {
 
 // Color-coded dimension labels
 const DIM_CONFIG = {
-  pain: {
-    label: "Pain Relief",
-    color: "bg-red-500",
-    textColor: "text-red-600",
-    barColor: "bg-red-500",
-    lightBg: "bg-red-100",
-  },
-  head: {
-    label: "Head Effect",
-    color: "bg-purple-500",
-    textColor: "text-purple-600",
-    barColor: "bg-purple-500",
-    lightBg: "bg-purple-100",
-  },
-  couch: {
-    label: "Couch Lock",
-    color: "bg-orange-500",
-    textColor: "text-orange-600",
-    barColor: "bg-orange-500",
-    lightBg: "bg-orange-100",
-  },
-  clarity: {
-    label: "Clarity",
-    color: "bg-blue-500",
-    textColor: "text-blue-600",
-    barColor: "bg-blue-500",
-    lightBg: "bg-blue-100",
-  },
-  duration: {
-    label: "Duration",
-    color: "bg-green-500",
-    textColor: "text-green-600",
-    barColor: "bg-green-500",
-    lightBg: "bg-green-100",
-  },
-  functionality: {
-    label: "Functionality",
-    color: "bg-teal-500",
-    textColor: "text-teal-600",
-    barColor: "bg-teal-500",
-    lightBg: "bg-teal-100",
-  },
-  anxiety: {
-    label: "Anxiety Risk",
-    color: "bg-yellow-500",
-    textColor: "text-yellow-600",
-    barColor: "bg-yellow-500",
-    lightBg: "bg-yellow-100",
-  },
+  pain: { label: "Pain Relief", color: "bg-red-500", textColor: "text-red-600", barColor: "bg-red-500", lightBg: "bg-red-100" },
+  head: { label: "Head Effect", color: "bg-purple-500", textColor: "text-purple-600", barColor: "bg-purple-500", lightBg: "bg-purple-100" },
+  couch: { label: "Couch Lock", color: "bg-orange-500", textColor: "text-orange-600", barColor: "bg-orange-500", lightBg: "bg-orange-100" },
+  clarity: { label: "Clarity", color: "bg-blue-500", textColor: "text-blue-600", barColor: "bg-blue-500", lightBg: "bg-blue-100" },
+  duration: { label: "Duration", color: "bg-green-500", textColor: "text-green-600", barColor: "bg-green-500", lightBg: "bg-green-100" },
+  functionality: { label: "Functionality", color: "bg-teal-500", textColor: "text-teal-600", barColor: "bg-teal-500", lightBg: "bg-teal-100" },
+  anxiety: { label: "Anxiety Risk", color: "bg-yellow-500", textColor: "text-yellow-600", barColor: "bg-yellow-500", lightBg: "bg-yellow-100" },
 };
 
 export default function App() {
@@ -123,9 +77,7 @@ export default function App() {
 
   const handleExport = () => {
     const json = exportProfileJson();
-    const filename = `mmet-profile-${new Date()
-      .toISOString()
-      .split("T")[0]}.json`;
+    const filename = `mmet-profile-${new Date().toISOString().split("T")[0]}.json`;
     downloadText(filename, json);
   };
 
@@ -169,27 +121,26 @@ export default function App() {
     setActiveProductId(null);
   };
 
-  const activeProduct = activeProductId
-    ? products.find((p) => p.id === activeProductId)
-    : null;
+  const activeProduct = activeProductId ? products.find((p) => p.id === activeProductId) : null;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50">
       {/* Header */}
-      <header className="bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg">
+      <header className="bg-gradient-to-r from-teal-800 via-slate-900 to-emerald-900 text-white shadow-lg">
         <div className="container mx-auto px-4 py-6">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-6">
             <img
               src={mmelLogo}
-              alt="MMEL logo"
-              className="h-12 w-12 rounded-xl object-contain"
+              alt="MEL logo"
+              className="h-24 w-24 object-contain"
+              loading="eager"
+              draggable="false"
             />
             <div className="leading-tight">
-              <h1 className="text-3xl font-bold">MMEL</h1>
-              <p className="text-green-100 text-sm">Marijuana Effect Lab</p>
-              <p className="text-green-100/90 text-xs mt-1">
-                COA → baseline • After-use ratings → personalized calibration •
-                Export/import profile
+              <div className="text-xs font-semibold tracking-wider text-white/70">MEL</div>
+              <h1 className="text-4xl font-bold">Marijuana Effect Lab</h1>
+              <p className="text-sm text-white/70">
+                COA baseline, then calibrate with your after-use ratings
               </p>
             </div>
           </div>
@@ -227,9 +178,7 @@ export default function App() {
 
             <button
               onClick={() => {
-                const ok = window.confirm(
-                  "Clear all products? This cannot be undone."
-                );
+                const ok = window.confirm("Clear all products? This cannot be undone.");
                 if (ok) clearProducts();
               }}
               disabled={products.length === 0}
@@ -248,12 +197,7 @@ export default function App() {
 
             <label className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold cursor-pointer transition-colors">
               📤 Import Profile
-              <input
-                type="file"
-                accept=".json"
-                onChange={handleImport}
-                className="hidden"
-              />
+              <input type="file" accept=".json" onChange={handleImport} className="hidden" />
             </label>
           </div>
         </div>
@@ -261,15 +205,11 @@ export default function App() {
         {/* Sorting Pills - COLOR CODED */}
         <div className="bg-white rounded-xl shadow-md p-4 mb-6">
           <div className="flex items-center gap-2 mb-3">
-            <span className="text-sm font-semibold text-gray-700">
-              🔀 Sort by:
-            </span>
+            <span className="text-sm font-semibold text-gray-700">🔀 Sort by:</span>
             <button
               onClick={() => setSortBy(null)}
               className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
-                sortBy === null
-                  ? "bg-gray-700 text-white shadow-md"
-                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                sortBy === null ? "bg-gray-700 text-white shadow-md" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
               }`}
             >
               Newest First
@@ -335,12 +275,8 @@ export default function App() {
         {/* Tab Content */}
         <div className="mb-8">
           {activeTab === "upload" && <COAUploader />}
-          {activeTab === "manual" && (
-            <ManualInput onCreateProduct={handleCreateManualProduct} />
-          )}
-          {activeTab === "blend" && (
-            <Blender products={products} onCreateBlend={handleCreateBlend} />
-          )}
+          {activeTab === "manual" && <ManualInput onCreateProduct={handleCreateManualProduct} />}
+          {activeTab === "blend" && <Blender products={products} onCreateBlend={handleCreateBlend} />}
         </div>
 
         {/* Products Grid */}
@@ -357,9 +293,7 @@ export default function App() {
           {sortedProducts.length === 0 ? (
             <div className="bg-white rounded-xl shadow-md p-12 text-center">
               <div className="text-6xl mb-4">🍃</div>
-              <p className="text-gray-600">
-                No products yet. Upload a COA, enter manually, or create a blend!
-              </p>
+              <p className="text-gray-600">No products yet. Upload a COA, enter manually, or create a blend!</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -385,11 +319,7 @@ export default function App() {
 
       {/* Session Modal */}
       {activeProduct && (
-        <SessionModal
-          product={activeProduct}
-          onClose={() => setActiveProductId(null)}
-          onSave={handleSaveSession}
-        />
+        <SessionModal product={activeProduct} onClose={() => setActiveProductId(null)} onSave={handleSaveSession} />
       )}
 
       <div className="mt-6 text-xs opacity-60">
