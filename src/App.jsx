@@ -40,6 +40,7 @@ export default function App() {
     addProduct,
     removeProduct,
     clearProducts,
+    renameProduct, // ✅ ADD THIS
     exportProfileJson,
     importProfileJson,
   } = useMmetStore();
@@ -310,6 +311,7 @@ export default function App() {
                   }
                   onLog={() => handleLogSession(p.id)}
                   onRemove={handleRemoveProduct}
+                  onRename={renameProduct}   {/* ✅ ADD THIS */}
                 />
               ))}
             </div>
