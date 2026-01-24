@@ -375,6 +375,13 @@ export const useMmetStore = create(
         lastError: null,
         lastParseAt: null,
 
+        showManualEntry: false,
+        setShowManualEntry: (v) => set({ showManualEntry: !!v }),
+
+        setProfileName: (name) => set({ profileName: String(name || "Default") }),
+        setScoreMode: (mode) => set({ scoreMode: mode }),
+        setScoreSource: (source) => set({ scoreSource: source }),
+
         parseCoaText: (coaText, meta = {}) => {
           try {
             const product = parseCoaTextToProduct(coaText, meta);
@@ -403,13 +410,15 @@ export const useMmetStore = create(
         removeProduct: (productId) => {
           set((state) => ({
             products: state.products.filter((p) => p.id !== productId),
+            // also clear any saved sessions for this product so Personalized count stays accurate
+            sessionLog: state.sessionLog.filter((s) => s.productId !== productId),
             lastError: null,
           }));
         },
 
-        // ✅ Clear all products (for the Clear All button)
+        // ✅ Clear all products AND sessions (so Personalized count resets too)
         clearProducts: () => {
-          set({ products: [], lastError: null });
+          set({ products: [], sessionLog: [], lastError: null });
         },
 
         // ✅ Rename product after parse (fix mis-captured names)
