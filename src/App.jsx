@@ -1,315 +1,301 @@
-// src/App.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useMmetStore } from "./store/mmetStore";
-import RatingControls from "./components/RatingControls";
+import React, { useMemo, useState } from "react";
+import COAUploader from "./components/COAUploader";
 import ProductCard from "./components/ProductCard";
-import SessionLog from "./components/SessionLog";
+import SessionModal from "./components/SessionModal";
+import Blender from "./components/Blender";
+import ManualInput from "./components/ManualInput";
+import { useMmetStore } from "./store/mmetStore";
+import { calculateBaselineScores, calculatePersonalizedScores, DIMS } from "./utils/scoring";
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Color-coded dimension labels
+const DIM_CONFIG = {
+  pain: { label: "Pain Relief", color: "bg-red-500", textColor: "text-red-600", barColor: "bg-red-500", lightBg: "bg-red-100" },
+  head: { label: "Head Effect", color: "bg-purple-500", textColor: "text-purple-600", barColor: "bg-purple-500", lightBg: "bg-purple-100" },
+  couch: { label: "Couch Lock", color: "bg-orange-500", textColor: "text-orange-600", barColor: "bg-orange-500", lightBg: "bg-orange-100" },
+  clarity: { label: "Clarity", color: "bg-blue-500", textColor: "text-blue-600", barColor: "bg-blue-500", lightBg: "bg-blue-100" },
+  duration: { label: "Duration", color: "bg-green-500", textColor: "text-green-600", barColor: "bg-green-500", lightBg: "bg-green-100" },
+  functionality: { label: "Functionality", color: "bg-teal-500", textColor: "text-teal-600", barColor: "bg-teal-500", lightBg: "bg-teal-100" },
+  anxiety: { label: "Anxiety Risk", color: "bg-yellow-500", textColor: "text-yellow-600", barColor: "bg-yellow-500", lightBg: "bg-yellow-100" },
+};
 
 export default function App() {
-  const {
-    products,
-    addProductsFromText,
-    addProductsFromFiles,
-    clearAllProducts,
-    removeProduct,
-    renameProduct,
-    setSortBy,
-    sortBy,
-    loadSampleProducts,
-  } = useMmetStore((s) => ({
-    products: s.products,
-    addProductsFromText: s.addProductsFromText,
-    addProductsFromFiles: s.addProductsFromFiles,
-    clearAllProducts: s.clearAllProducts,
-    removeProduct: s.removeProduct,
-    renameProduct: s.renameProduct,
-    setSortBy: s.setSortBy,
-    sortBy: s.sortBy,
-    loadSampleProducts: s.loadSampleProducts,
-  }));
+  const { products, sessionLog, addSessionEntry, addProduct, removeProduct, exportProfileJson, importProfileJson } = useMmetStore();
 
-  // Local UI state
-  const [pasteText, setPasteText] = useState("");
-  const [dragActive, setDragActive] = useState(false);
-  const [parseError, setParseError] = useState("");
-  const [isParsing, setIsParsing] = useState(false);
+  const [mode, setMode] = useState("baseline");
+  const [sortBy, setSortBy] = useState(null);
+  const [activeTab, setActiveTab] = useState("upload");
+  const [activeProductId, setActiveProductId] = useState(null);
 
-  const resultsRef = useRef(null);
-
-  const productCount = products?.length ?? 0;
+  const scoresById = useMemo(() => {
+    const out = {};
+    for (const p of products) {
+      if (p.customScores) {
+        out[p.id] = p.customScores;
+      } else {
+        const baseline = calculateBaselineScores(p);
+        out[p.id] = mode === "personalized" 
+          ? calculatePersonalizedScores(baseline, sessionLog, p.id, products)
+          : baseline;
+      }
+    }
+    return out;
+  }, [products, sessionLog, mode]);
 
   const sortedProducts = useMemo(() => {
-    const list = Array.isArray(products) ? [...products] : [];
-    if (!sortBy) return list;
-
-    // Common sort keys you’ve used: "Energy", "Relax", "Sleep", etc.
-    // We sort by the score field if present: product.mmet?.scores[sortBy]
-    return list.sort((a, b) => {
-      const aVal =
-        (a?.mmet?.scores && typeof a.mmet.scores[sortBy] === "number"
-          ? a.mmet.scores[sortBy]
-          : 0) ?? 0;
-      const bVal =
-        (b?.mmet?.scores && typeof b.mmet.scores[sortBy] === "number"
-          ? b.mmet.scores[sortBy]
-          : 0) ?? 0;
-      return bVal - aVal;
+    if (!sortBy) return products;
+    
+    return [...products].sort((a, b) => {
+      const scoreA = scoresById[a.id]?.[sortBy] || 0;
+      const scoreB = scoresById[b.id]?.[sortBy] || 0;
+      return scoreB - scoreA;
     });
-  }, [products, sortBy]);
+  }, [products, scoresById, sortBy]);
 
-  function scrollToResults() {
-    // Wait for DOM paint
-    requestAnimationFrame(() => {
-      if (resultsRef.current) {
-        resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  const handleExport = () => {
+    const json = exportProfileJson();
+    const filename = `mmet-profile-${new Date().toISOString().split("T")[0]}.json`;
+    downloadText(filename, json);
+  };
+
+  const handleImport = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        importProfileJson(evt.target?.result);
+        alert("Profile imported successfully!");
+      } catch (err) {
+        alert("Failed to import profile: " + err.message);
       }
-    });
-  }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
 
-  async function handleParsePaste() {
-    setParseError("");
-    const text = (pasteText || "").trim();
-    if (!text) return;
+  const handleCreateManualProduct = (product) => {
+    addProduct(product);
+    alert("✓ Product added successfully!");
+  };
 
-    try {
-      setIsParsing(true);
-      await addProductsFromText(text);
-      setPasteText("");
-      scrollToResults();
-    } catch (e) {
-      setParseError(e?.message || "Failed to parse pasted text.");
-    } finally {
-      setIsParsing(false);
-    }
-  }
+  const handleCreateBlend = (blend) => {
+    addProduct(blend);
+    alert("✓ Blend saved to products!");
+    setActiveTab("upload");
+  };
 
-  async function handleFilesSelected(fileList) {
-    setParseError("");
-    const files = Array.from(fileList || []);
-    if (!files.length) return;
+  const handleRemoveProduct = (productId) => {
+    removeProduct(productId);
+  };
 
-    try {
-      setIsParsing(true);
-      await addProductsFromFiles(files);
-      scrollToResults();
-    } catch (e) {
-      setParseError(e?.message || "Failed to parse uploaded file(s).");
-    } finally {
-      setIsParsing(false);
-    }
-  }
+  const handleLogSession = (productId) => {
+    setActiveProductId(productId);
+  };
 
-  function handleDragOver(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(true);
-  }
+  const handleSaveSession = (data) => {
+    addSessionEntry(data);
+    setActiveProductId(null);
+  };
 
-  function handleDragLeave(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-  }
-
-  function handleDrop(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    const dt = e.dataTransfer;
-    if (dt?.files?.length) {
-      handleFilesSelected(dt.files);
-    }
-  }
-
-  function handleRemoveProduct(id) {
-    removeProduct(id);
-  }
-
-  // If store doesn’t expose sortBy yet, keep UI stable
-  useEffect(() => {
-    if (typeof sortBy === "undefined") {
-      // no-op
-    }
-  }, [sortBy]);
+  const activeProduct = activeProductId ? products.find(p => p.id === activeProductId) : null;
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-emerald-50">
       {/* Header */}
-      <header className="sticky top-0 z-40 border-b bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-          <div className="flex flex-col">
-            <h1 className="text-lg font-bold leading-tight">MMET Predictor v2</h1>
-            <p className="text-xs text-gray-600">
-              Paste COA text or upload files → parse → score → rank → log sessions
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-              onClick={loadSampleProducts}
-              type="button"
-            >
-              Load Sample Products
-            </button>
-
-            <button
-              className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-              onClick={clearAllProducts}
-              type="button"
-              disabled={!productCount}
-              title={!productCount ? "No products to clear" : "Clear all products"}
-            >
-              Clear All Products
-            </button>
+      <header className="bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg">
+        <div className="container mx-auto px-4 py-6">
+          <div className="flex items-center gap-4">
+            {/* Medical Cross + Leaf Logo */}
+            <div className="relative w-16 h-16 flex-shrink-0">
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div className="w-8 h-16 bg-white rounded-md opacity-90"></div>
+                <div className="absolute w-16 h-8 bg-white rounded-md opacity-90"></div>
+              </div>
+              <div className="absolute inset-0 flex items-center justify-center text-4xl">
+                🌿
+              </div>
+            </div>
+            <div>
+              <h1 className="text-3xl font-bold">MMET Predictor</h1>
+              <p className="text-green-100 text-sm">COA → baseline • After-use ratings → personalized calibration • Export/import profile</p>
+            </div>
           </div>
         </div>
       </header>
 
-      {/* Main */}
-      <main className="mx-auto max-w-6xl px-4 py-6">
-        {/* Upload / Paste */}
-        <section className="grid gap-4 md:grid-cols-2">
-          {/* Paste */}
-          <div className="rounded-2xl border bg-white p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Paste COA Text</h2>
-              <span className="text-xs text-gray-500">
-                Tip: paste multiple products back-to-back
-              </span>
-            </div>
-
-            <textarea
-              className="h-40 w-full rounded-xl border p-3 text-sm outline-none focus:ring"
-              placeholder="Paste COA text here…"
-              value={pasteText}
-              onChange={(e) => setPasteText(e.target.value)}
-            />
-
-            <div className="mt-3 flex items-center justify-between gap-2">
+      <div className="container mx-auto px-4 py-8">
+        {/* Mode Toggle + Export/Import */}
+        <div className="bg-white rounded-xl shadow-md p-4 mb-6">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
               <button
-                className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                onClick={handleParsePaste}
-                type="button"
-                disabled={isParsing || !pasteText.trim()}
+                onClick={() => setMode("baseline")}
+                className={`px-6 py-2 rounded-lg font-semibold transition-all ${
+                  mode === "baseline"
+                    ? "bg-green-600 text-white shadow-md"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
               >
-                {isParsing ? "Parsing…" : "Parse COA(s) & Score"}
+                Baseline
               </button>
-
               <button
-                className="rounded-xl border px-4 py-2 text-sm hover:bg-gray-50"
-                onClick={() => setPasteText("")}
-                type="button"
+                onClick={() => setMode("personalized")}
+                className={`px-6 py-2 rounded-lg font-semibold transition-all ${
+                  mode === "personalized"
+                    ? "bg-green-600 text-white shadow-md"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
               >
-                Clear Paste
+                Personalized {sessionLog.length > 0 && `(${sessionLog.length})`}
               </button>
             </div>
 
-            {parseError ? (
-              <p className="mt-3 rounded-xl bg-red-50 p-3 text-sm text-red-700">
-                {parseError}
-              </p>
-            ) : null}
+            <div className="flex-1" />
+
+            <button
+              onClick={handleExport}
+              disabled={products.length === 0}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white rounded-lg font-semibold transition-colors"
+            >
+              📥 Export Profile
+            </button>
+            
+            <label className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold cursor-pointer transition-colors">
+              📤 Import Profile
+              <input type="file" accept=".json" onChange={handleImport} className="hidden" />
+            </label>
           </div>
+        </div>
 
-          {/* Upload */}
-          <div
-            className={[
-              "rounded-2xl border bg-white p-4 shadow-sm",
-              dragActive ? "ring-2 ring-black" : "",
-            ].join(" ")}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-          >
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Upload COA Files</h2>
-              <span className="text-xs text-gray-500">TXT supported now (PDF next)</span>
-            </div>
-
-            <div className="rounded-xl border border-dashed p-6 text-center">
-              <p className="text-sm">
-                Drag & drop COA files here, or choose files.
-              </p>
-              <p className="mt-1 text-xs text-gray-500">
-                Current build accepts text-based COAs. (We’ll add PDF safely after build is green.)
-              </p>
-
-              <div className="mt-4">
-                <input
-                  className="block w-full text-sm"
-                  type="file"
-                  multiple
-                  accept=".txt,text/plain"
-                  onChange={(e) => handleFilesSelected(e.target.files)}
-                />
-              </div>
-            </div>
+        {/* Sorting Pills - COLOR CODED */}
+        <div className="bg-white rounded-xl shadow-md p-4 mb-6">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-semibold text-gray-700">🔀 Sort by:</span>
+            <button
+              onClick={() => setSortBy(null)}
+              className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all ${
+                sortBy === null
+                  ? "bg-gray-700 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              Newest First
+            </button>
           </div>
-        </section>
-
-        {/* Sorting + Ratings */}
-        <section className="mt-6 grid gap-4 md:grid-cols-3">
-          <div className="md:col-span-2 rounded-2xl border bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Rank Products</h2>
-              <div className="text-xs text-gray-500">{productCount} product(s)</div>
-            </div>
-
-            {/* RatingControls is expected to call store.setSortBy */}
-            <RatingControls
-              sortBy={sortBy || ""}
-              onSortChange={(key) => setSortBy(key)}
-            />
-
-            <p className="mt-3 text-xs text-gray-500">
-              Click an effect button to sort by that score.
-            </p>
+          
+          <div className="flex flex-wrap gap-2">
+            {DIMS.map((dim) => {
+              const config = DIM_CONFIG[dim];
+              return (
+                <button
+                  key={dim}
+                  onClick={() => setSortBy(dim)}
+                  className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-all ${
+                    sortBy === dim
+                      ? `${config.color} text-white shadow-md`
+                      : `${config.lightBg} ${config.textColor} hover:${config.color} hover:text-white`
+                  }`}
+                >
+                  {config.label}
+                </button>
+              );
+            })}
           </div>
+        </div>
 
-          <div className="rounded-2xl border bg-white p-4 shadow-sm">
-            <h2 className="text-sm font-semibold">Session Log</h2>
-            <p className="mt-1 text-xs text-gray-500">
-              This is the calibration loop. We’ll hook persistence/import-export next.
-            </p>
-            <div className="mt-3">
-              <SessionLog />
-            </div>
+        {/* Tabs */}
+        <div className="bg-white rounded-xl shadow-md p-2 mb-6">
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveTab("upload")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "upload"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              📤 Upload COA
+            </button>
+            <button
+              onClick={() => setActiveTab("manual")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "manual"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              ✍️ Manual Entry
+            </button>
+            <button
+              onClick={() => setActiveTab("blend")}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-all ${
+                activeTab === "blend"
+                  ? "bg-green-600 text-white shadow-md"
+                  : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+              }`}
+            >
+              🌪️ Blend Products
+            </button>
           </div>
-        </section>
+        </div>
 
-        {/* Results */}
-        <section className="mt-6" ref={resultsRef}>
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Products</h2>
-          </div>
+        {/* Tab Content */}
+        <div className="mb-8">
+          {activeTab === "upload" && <COAUploader />}
+          {activeTab === "manual" && <ManualInput onCreateProduct={handleCreateManualProduct} />}
+          {activeTab === "blend" && <Blender products={products} onCreateBlend={handleCreateBlend} />}
+        </div>
 
+        {/* Products Grid */}
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800 mb-4">
+            Products ({products.length})
+            {sortBy && <span className="text-lg font-normal text-gray-600 ml-2">- Sorted by {DIM_CONFIG[sortBy].label}</span>}
+          </h2>
+          
           {sortedProducts.length === 0 ? (
-            <div className="rounded-2xl border bg-white p-6 text-sm text-gray-600 shadow-sm">
-              No products yet. Load samples, paste COA text, or upload files.
+            <div className="bg-white rounded-xl shadow-md p-12 text-center">
+              <div className="text-6xl mb-4">🍃</div>
+              <p className="text-gray-600">No products yet. Upload a COA, enter manually, or create a blend!</p>
             </div>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
               {sortedProducts.map((p) => (
                 <ProductCard
                   key={p.id}
                   product={p}
-                  sortBy={sortBy}
+                  scores={scoresById[p.id]}
+                  dimConfig={DIM_CONFIG}
+                  modeLabel={mode === "baseline" ? "Baseline (from COA terpenes)" : "Personalized (baseline adjusted by your history)"}
+                  onLog={() => handleLogSession(p.id)}
                   onRemove={handleRemoveProduct}
-                  onRename={renameProduct}
                 />
               ))}
             </div>
           )}
-        </section>
-      </main>
-
-      {/* Footer */}
-      <footer className="border-t bg-white">
-        <div className="mx-auto max-w-6xl px-4 py-6 text-xs text-gray-500">
-          Build-first rule: keep Vercel green, then add PDF parsing + persistence.
         </div>
-      </footer>
+      </div>
+
+      {/* Session Modal */}
+      {activeProduct && (
+        <SessionModal
+          product={activeProduct}
+          onClose={() => setActiveProductId(null)}
+          onSave={handleSaveSession}
+        />
+      )}
     </div>
   );
 }
