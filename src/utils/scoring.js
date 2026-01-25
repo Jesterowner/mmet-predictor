@@ -6,7 +6,7 @@
 // - Uses full terp list (product.terpenes) + totalTerpenes + form + THC
 // - Outputs your UI dims (0..5, rounded to 0.5)
 //
-// FIX (this commit): stop “Head Effect = 5.0 on everything”
+// FIX: stop “Head Effect = 5.0 on everything”
 // - Advanced engine returns 0..1 signals that can cluster high for potent concentrates
 // - We now:
 //   1) derive HEAD from a balance of head + clarity minus sedation/couch
@@ -17,10 +17,13 @@ import { calculateBaseline as calculateAdvancedBaseline } from "./mmetBaselineFo
 
 export const DIMS = ["pain", "head", "couch", "clarity", "duration", "functionality", "anxiety"];
 
+// Turn on when you want to inspect advanced baseline outputs in console
+const DEBUG_ADV_BASELINE = false;
+
 const BAND_THRESHOLDS = {
-  PRIMARY: 0.80,
-  DOMINANT: 0.30,
-  SUPPORTING: 0.10,
+  PRIMARY: 0.8,
+  DOMINANT: 0.3,
+  SUPPORTING: 0.1,
 };
 
 // Kept for backward compatibility (not used in advanced baseline path anymore)
@@ -106,6 +109,20 @@ export function calculateBaselineScores(product) {
     terpenes,
   });
 
+  // ✅ Debug belongs INSIDE the function (otherwise it crashes the module)
+  if (DEBUG_ADV_BASELINE && typeof window !== "undefined") {
+    // reduce spam: only log when called from UI rendering
+    // (toggle DEBUG_ADV_BASELINE to true when you need it)
+    console.log("[ADV BASELINE DEBUG]", {
+      name: product?.name,
+      thc,
+      totalTerpenes,
+      form,
+      terpCount: terpenes.length,
+      adv,
+    });
+  }
+
   // Normalize raw signals (0..1 expected)
   const headRaw = clamp01(adv?.head);
   const clarityRaw = clamp01(adv?.clarity);
@@ -142,16 +159,15 @@ export function calculateBaselineScores(product) {
   );
 
   // Anxiety: rescale so it doesn’t default to “max” at high THC
-  // (advanced engine’s anxietyRisk baseline can sit high for concentrates)
   const anxiety01 = clamp01((anxietyRaw - 0.22) / 0.78);
 
   // ---- Per-dimension scaling tuned to reduce “everything = 5”
-  const pain = toScore5Scaled(pain01, { lo: 0.10, hi: 0.80, gamma: 1.10 });
+  const pain = toScore5Scaled(pain01, { lo: 0.1, hi: 0.8, gamma: 1.1 });
   const head = toScore5Scaled(head01, { lo: 0.15, hi: 0.85, gamma: 1.35 });
-  const couch = toScore5Scaled(couch01, { lo: 0.10, hi: 0.88, gamma: 1.25 });
+  const couch = toScore5Scaled(couch01, { lo: 0.1, hi: 0.88, gamma: 1.25 });
   const clarity = toScore5Scaled(clarity01, { lo: 0.12, hi: 0.88, gamma: 1.05 });
-  const functionality = toScore5Scaled(functionality01, { lo: 0.12, hi: 0.90, gamma: 1.10 });
-  const anxiety = toScore5Scaled(anxiety01, { lo: 0.00, hi: 1.00, gamma: 1.20 });
+  const functionality = toScore5Scaled(functionality01, { lo: 0.12, hi: 0.9, gamma: 1.1 });
+  const anxiety = toScore5Scaled(anxiety01, { lo: 0.0, hi: 1.0, gamma: 1.2 });
 
   return {
     pain: Math.max(0, Math.min(5, pain)),
@@ -174,31 +190,25 @@ function calculateUserCalibration(sessionLog, allProducts) {
   for (const dim of DIMS) {
     const dataPoints = [];
 
-    // Go through all sessions
     for (const session of sessionLog) {
       const productId = session.productId;
       const actualValue = session.actuals?.[dim];
 
       if (actualValue == null || typeof actualValue !== "number") continue;
 
-      // Find the product to get its baseline prediction
       const product = (allProducts || []).find((p) => p.id === productId);
       if (!product) continue;
 
       const baselineScores = calculateBaselineScores(product);
       const predictedValue = baselineScores[dim];
 
-      // Calculate the delta (how much user differs from baseline)
       const delta = actualValue - predictedValue;
       dataPoints.push(delta);
     }
 
     if (dataPoints.length > 0) {
-      // Average delta for this dimension
       const avgDelta = dataPoints.reduce((a, b) => a + b, 0) / dataPoints.length;
-
-      // Confidence based on number of data points
-      const confidence = Math.min(dataPoints.length / 10, 0.8); // Max 80% confidence
+      const confidence = Math.min(dataPoints.length / 10, 0.8);
 
       calibration[dim] = {
         adjustment: avgDelta,
@@ -226,34 +236,20 @@ export function calculatePersonalizedScores(baselineScores, sessionLog, productI
     return baselineScores;
   }
 
-  // Calculate user's personal calibration from ALL their sessions
   const calibration = calculateUserCalibration(sessionLog, allProducts || []);
-
   const personalizedScores = { ...baselineScores };
 
   for (const dim of DIMS) {
     const cal = calibration[dim];
 
     if (cal && cal.confidence > 0) {
-      // Apply the learned adjustment weighted by confidence
       const adjustment = cal.adjustment * cal.confidence;
       personalizedScores[dim] = baselineScores[dim] + adjustment;
 
-      // Round to 0.5
       personalizedScores[dim] = Math.round(personalizedScores[dim] * 2) / 2;
-
-      // Clamp to 0-5
       personalizedScores[dim] = Math.max(0, Math.min(5, personalizedScores[dim]));
     }
   }
 
   return personalizedScores;
 }
-console.log("[ADV BASELINE DEBUG]", {
-  name: product?.name,
-  thc,
-  totalTerpenes,
-  form,
-  terpCount: terpenes.length,
-  adv,
-});
