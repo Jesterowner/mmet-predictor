@@ -5,6 +5,13 @@
 // - No strain needed
 // - Uses full terp list (product.terpenes) + totalTerpenes + form + THC
 // - Outputs your UI dims (0..5, rounded to 0.5)
+//
+// FIX (this commit): stop “Head Effect = 5.0 on everything”
+// - Advanced engine returns 0..1 signals that can cluster high for potent concentrates
+// - We now:
+//   1) derive HEAD from a balance of head + clarity minus sedation/couch
+//   2) apply per-dimension scaling (lo/hi) + gamma curve so values don’t peg at 5
+//   3) rescale anxietyRisk so it doesn’t default to max for high-THC concentrates
 
 import { calculateBaseline as calculateAdvancedBaseline } from "./mmetBaselineFormulas";
 
@@ -67,7 +74,19 @@ const TERPENE_EFFECTS = {
 // -------- Advanced baseline mapping helpers --------
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 const toHalf = (v) => Math.round(v * 2) / 2;
-const toScore5 = (x01) => toHalf(clamp01(x01) * 5);
+
+/**
+ * Map a 0..1 signal into a 0..5 UI score with:
+ * - lo/hi rescale (prevents “everything is high” from pegging)
+ * - gamma curve (compresses the high end if gamma > 1)
+ */
+function toScore5Scaled(x01, { lo = 0, hi = 1, gamma = 1 } = {}) {
+  const x = clamp01(Number(x01 || 0));
+  const denom = Math.max(1e-9, hi - lo);
+  const t = clamp01((x - lo) / denom);
+  const curved = Math.pow(t, gamma);
+  return toHalf(5 * curved);
+}
 
 /**
  * Advanced Baseline -> UI Scores (0..5, rounded to 0.5)
@@ -78,37 +97,61 @@ export function calculateBaselineScores(product) {
 
   // Advanced engine should use full terp list, not top6
   const terpenes = Array.isArray(product?.terpenes) ? product.terpenes : [];
-
   const form = product?.form || "";
 
   const adv = calculateAdvancedBaseline({
     totalTHC: thc,
-    totalTerpenes: totalTerpenes,
+    totalTerpenes,
     form,
     terpenes,
   });
 
-  // Direct mappings from advanced engine (0..1)
-  const pain = toScore5(adv.pain);
-  const head = toScore5(adv.head);
-  const couch = toScore5(adv.couch);
-  const clarity = toScore5(adv.clarity);
+  // Normalize raw signals (0..1 expected)
+  const headRaw = clamp01(adv?.head);
+  const clarityRaw = clamp01(adv?.clarity);
+  const sedationRaw = clamp01(adv?.sedation);
+  const couchRaw = clamp01(adv?.couch);
+  const painRaw = clamp01(adv?.pain);
+  const anxietyRaw = clamp01(adv?.anxietyRisk);
 
-  // Duration uses metadata hours; map 0..18h => 0..5
+  // ---- Key fix: Head Effect should NOT be maxed for most concentrates
+  // Head is a balance: “headiness” + clarity minus sedation/couch.
+  const head01 = clamp01(
+    0.78 * headRaw +
+      0.22 * clarityRaw -
+      0.28 * sedationRaw -
+      0.12 * couchRaw
+  );
+
+  // Clarity gets slightly pulled down by sedation (small, not a cliff)
+  const clarity01 = clamp01(clarityRaw * (1 - 0.18 * sedationRaw));
+
+  // Couch tracks couch + some sedation reinforcement
+  const couch01 = clamp01(couchRaw + 0.18 * sedationRaw);
+
+  // Pain can stay closer to raw (it tends to be less “pegged”)
+  const pain01 = clamp01(painRaw);
+
+  // Duration uses metadata hours; map 0..18h => 0..5 (and round to 0.5)
   const durHours = Number(adv?._meta?.durationHours || 0);
   const duration = toHalf(Math.max(0, Math.min(5, (durHours / 18) * 5)));
 
   // Functionality derived from clarity + inverse sedation/couch
-  const sedation = clamp01(Number(adv.sedation || 0));
-  const couch01 = clamp01(Number(adv.couch || 0));
-  const clarity01 = clamp01(Number(adv.clarity || 0));
   const functionality01 = clamp01(
-    0.55 * clarity01 + 0.45 * (1 - (0.6 * sedation + 0.4 * couch01))
+    0.60 * clarity01 + 0.40 * (1 - (0.62 * sedationRaw + 0.38 * couch01))
   );
-  const functionality = toScore5(functionality01);
 
-  // Anxiety: advanced anxietyRisk is 0..1 (higher = worse)
-  const anxiety = toScore5(Number(adv.anxietyRisk || 0));
+  // Anxiety: rescale so it doesn’t default to “max” at high THC
+  // (advanced engine’s anxietyRisk baseline can sit high for concentrates)
+  const anxiety01 = clamp01((anxietyRaw - 0.22) / 0.78);
+
+  // ---- Per-dimension scaling tuned to reduce “everything = 5”
+  const pain = toScore5Scaled(pain01, { lo: 0.10, hi: 0.80, gamma: 1.10 });
+  const head = toScore5Scaled(head01, { lo: 0.15, hi: 0.85, gamma: 1.35 });
+  const couch = toScore5Scaled(couch01, { lo: 0.10, hi: 0.88, gamma: 1.25 });
+  const clarity = toScore5Scaled(clarity01, { lo: 0.12, hi: 0.88, gamma: 1.05 });
+  const functionality = toScore5Scaled(functionality01, { lo: 0.12, hi: 0.90, gamma: 1.10 });
+  const anxiety = toScore5Scaled(anxiety01, { lo: 0.00, hi: 1.00, gamma: 1.20 });
 
   return {
     pain: Math.max(0, Math.min(5, pain)),
@@ -159,7 +202,7 @@ function calculateUserCalibration(sessionLog, allProducts) {
 
       calibration[dim] = {
         adjustment: avgDelta,
-        confidence: confidence,
+        confidence,
         dataPoints: dataPoints.length,
       };
     } else {
