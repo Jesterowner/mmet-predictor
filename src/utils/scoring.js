@@ -249,3 +249,11 @@ export function calculatePersonalizedScores(baselineScores, sessionLog, productI
 
   return personalizedScores;
 }
+console.log("[ADV BASELINE DEBUG]", {
+  name: product?.name,
+  thc,
+  totalTerpenes,
+  form,
+  terpCount: terpenes.length,
+  adv,
+});
