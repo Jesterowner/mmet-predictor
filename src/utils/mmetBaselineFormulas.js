@@ -38,49 +38,56 @@ export const THC_BANDS = [
   { key: "extreme", min: 35, max: Infinity, label: "Extreme", anxietyRisk: 0.85, potency: 0.95 },
 ];
 
+/**
+ * IMPORTANT TUNING NOTES (Fix for "Head Effect pegged at 5"):
+ * - Your old intensityMod values (2.0–2.5) caused head/couch/anxiety to clamp at 1.0
+ * - These values are intentionally more realistic and allow terp profile to matter.
+ * - Edibles get LONG duration + heavier sedation/couch via form vector and duration metadata,
+ *   not by cranking intensityMod to 2.5.
+ */
 export const FORM_MODIFIERS = {
   edible: {
     key: "edible",
-    intensityMod: 2.5,
-    durationMod: 3.0,
-    anxietyRiskAdd: 0.30,
-    terpeneRetention: 0.15,
+    intensityMod: 1.25,
+    durationMod: 1.40,
+    anxietyRiskAdd: 0.12,
+    terpeneRetention: 0.25,
     onsetMinutes: 60,
     baseDurationHours: 6,
   },
   concentrate: {
     key: "concentrate",
-    intensityMod: 2.0,
-    durationMod: 1.4,
-    anxietyRiskAdd: 0.25,
-    terpeneRetention: 0.45,
+    intensityMod: 1.35,
+    durationMod: 1.00,
+    anxietyRiskAdd: 0.06,
+    terpeneRetention: 0.70,
     onsetMinutes: 5,
     baseDurationHours: 2,
   },
   live_resin: {
     key: "live_resin",
-    intensityMod: 1.8,
-    durationMod: 1.35,
-    anxietyRiskAdd: 0.15,
-    terpeneRetention: 0.75,
+    intensityMod: 1.30,
+    durationMod: 1.00,
+    anxietyRiskAdd: 0.04,
+    terpeneRetention: 0.85,
     onsetMinutes: 5,
     baseDurationHours: 2,
   },
   flower: {
     key: "flower",
-    intensityMod: 1.0,
-    durationMod: 1.0,
-    anxietyRiskAdd: 0.0,
-    terpeneRetention: 0.90,
+    intensityMod: 1.00,
+    durationMod: 1.00,
+    anxietyRiskAdd: 0.00,
+    terpeneRetention: 0.95,
     onsetMinutes: 8,
     baseDurationHours: 2,
   },
   topical: {
     key: "topical",
-    intensityMod: 0.0,
-    durationMod: 0.0,
-    anxietyRiskAdd: 0.0,
-    terpeneRetention: 1.0,
+    intensityMod: 0.00,
+    durationMod: 0.00,
+    anxietyRiskAdd: 0.00,
+    terpeneRetention: 1.00,
     onsetMinutes: 0,
     baseDurationHours: 0,
   },
@@ -112,7 +119,10 @@ export function normalizeFormType(raw) {
   }
 
   // Live Resin / Live product forms
-  if (s.includes("live") && (s.includes("resin") || s.includes("badder") || s.includes("sugar") || s.includes("sauce") || s.includes("diamonds"))) {
+  if (
+    s.includes("live") &&
+    (s.includes("resin") || s.includes("badder") || s.includes("sugar") || s.includes("sauce") || s.includes("diamonds"))
+  ) {
     return "live_resin";
   }
   if (s.includes("live resin")) return "live_resin";
@@ -176,12 +186,15 @@ function buildTerpMap(terpenes) {
 function thcBaseVector(potency) {
   // potency: 0..1
   const p = clamp01(potency);
+
+  // TUNING: reduce head aggressiveness so high-THC doesn’t automatically mean "max head high"
+  // while keeping sedation/couch meaningful at higher potency.
   return {
-    head: clamp01(0.25 + 0.65 * p),
-    clarity: clamp01(0.85 - 0.55 * p),
-    sedation: clamp01(0.10 + 0.70 * p),
-    couch: clamp01(0.05 + 0.55 * p),
-    pain: clamp01(0.20 + 0.45 * p),
+    head: clamp01(0.18 + 0.52 * p),
+    clarity: clamp01(0.88 - 0.58 * p),
+    sedation: clamp01(0.10 + 0.72 * p),
+    couch: clamp01(0.06 + 0.56 * p),
+    pain: clamp01(0.22 + 0.46 * p),
   };
 }
 
@@ -214,13 +227,15 @@ function applyTerpModifiers(vec, terpMap, totalTerpenesPct) {
     out.pain = clamp01(out.pain + 0.10 * terpStrength + 0.06 * clamp01(caryo / 3));
     out.sedation = clamp01(out.sedation + 0.04 * terpStrength);
     out.couch = clamp01(out.couch + 0.03 * terpStrength);
+    out.head = clamp01(out.head - 0.02 * terpStrength); // slightly less "heady" when body-forward
   }
 
   // linalool: sedation + sleep support
   if (linalool > 0) {
     out.sedation = clamp01(out.sedation + 0.10 * terpStrength + 0.06 * clamp01(linalool / 1.5));
-    out.clarity = clamp01(out.clarity - 0.03 * terpStrength);
-    out.couch = clamp01(out.couch + 0.04 * terpStrength);
+    out.clarity = clamp01(out.clarity - 0.04 * terpStrength);
+    out.couch = clamp01(out.couch + 0.05 * terpStrength);
+    out.head = clamp01(out.head - 0.04 * terpStrength);
   }
 
   // limonene: uplift + clarity
@@ -234,7 +249,8 @@ function applyTerpModifiers(vec, terpMap, totalTerpenesPct) {
   if (myrcene > 0) {
     out.sedation = clamp01(out.sedation + 0.08 * terpStrength + 0.04 * clamp01(myrcene / 1.5));
     out.couch = clamp01(out.couch + 0.10 * terpStrength + 0.05 * clamp01(myrcene / 1.5));
-    out.clarity = clamp01(out.clarity - 0.05 * terpStrength);
+    out.clarity = clamp01(out.clarity - 0.06 * terpStrength);
+    out.head = clamp01(out.head - 0.05 * terpStrength);
   }
 
   // humulene: supporting body relief
@@ -247,6 +263,7 @@ function applyTerpModifiers(vec, terpMap, totalTerpenesPct) {
   if (bisabolol > 0) {
     out.pain = clamp01(out.pain + 0.04 * terpStrength);
     out.sedation = clamp01(out.sedation + 0.03 * terpStrength);
+    out.head = clamp01(out.head - 0.02 * terpStrength);
   }
 
   // terpinolene: often more “heady”
@@ -259,6 +276,7 @@ function applyTerpModifiers(vec, terpMap, totalTerpenesPct) {
   if (pinene > 0) {
     out.clarity = clamp01(out.clarity + 0.07 * terpStrength);
     out.sedation = clamp01(out.sedation - 0.03 * terpStrength);
+    out.head = clamp01(out.head + 0.02 * terpStrength);
   }
 
   // ocimene: lightly uplifting
@@ -280,14 +298,33 @@ function formDirectVector(formKey) {
   }
 
   // Higher intensity tends to increase sedation/couch and reduce clarity.
-  const intensityLift = clamp01((f.intensityMod - 1) / 2); // 0..~0.75
-  return {
-    head: clamp01(0.10 + 0.20 * intensityLift),
-    clarity: clamp01(0.10 - 0.10 * intensityLift),
-    sedation: clamp01(0.10 + 0.25 * intensityLift),
-    couch: clamp01(0.06 + 0.20 * intensityLift),
-    pain: clamp01(0.08 + 0.18 * intensityLift),
+  const intensityLift = clamp01((f.intensityMod - 1) / 2); // 0..~0.25 with tuned mods
+
+  let vec = {
+    head: clamp01(0.10 + 0.12 * intensityLift),
+    clarity: clamp01(0.12 - 0.10 * intensityLift),
+    sedation: clamp01(0.10 + 0.22 * intensityLift),
+    couch: clamp01(0.08 + 0.18 * intensityLift),
+    pain: clamp01(0.10 + 0.18 * intensityLift),
   };
+
+  // ✅ FORM SHAPING (this is what you asked for):
+  // Edibles: not a spiky head high; heavier body + lower clarity, long duration handled in meta
+  if (formKey === "edible") {
+    vec.head = clamp01(vec.head * 0.70);
+    vec.sedation = clamp01(vec.sedation + 0.18);
+    vec.couch = clamp01(vec.couch + 0.18);
+    vec.clarity = clamp01(vec.clarity * 0.70);
+  }
+
+  // Concentrates: more intensity / body weight, but DO NOT force head to max
+  if (formKey === "concentrate" || formKey === "live_resin") {
+    vec.sedation = clamp01(vec.sedation + 0.06);
+    vec.couch = clamp01(vec.couch + 0.05);
+    vec.head = clamp01(vec.head + 0.03);
+  }
+
+  return vec;
 }
 
 function mixWeighted(a, b, wA, wB) {
@@ -323,15 +360,22 @@ export function calculateBaseline(input) {
 
   // Apply intensity multiplier to “felt” effects (but keep topical at 0)
   const intensity = num(form.intensityMod, 1);
+
+  // TUNING: do NOT scale head as aggressively as sedation/couch
+  const headScale = 0.92 + 0.12 * intensity;      // ~1.04 max at intensity=1.0, ~1.08 at 1.35
+  const sedScale = 0.85 + 0.30 * intensity;       // stronger
+  const couchScale = 0.85 + 0.30 * intensity;     // stronger
+  const painScale = 0.90 + 0.20 * intensity;
+
   const scaled =
     intensity === 0
       ? { head: 0, clarity: 0, sedation: 0, couch: 0, pain: 0 }
       : {
-          head: clamp01(baselineVec.head * (0.85 + 0.25 * intensity)),
+          head: clamp01(baselineVec.head * headScale),
           clarity: clamp01(baselineVec.clarity * (1.0 - 0.12 * (intensity - 1))),
-          sedation: clamp01(baselineVec.sedation * (0.85 + 0.30 * intensity)),
-          couch: clamp01(baselineVec.couch * (0.85 + 0.30 * intensity)),
-          pain: clamp01(baselineVec.pain * (0.90 + 0.20 * intensity)),
+          sedation: clamp01(baselineVec.sedation * sedScale),
+          couch: clamp01(baselineVec.couch * couchScale),
+          pain: clamp01(baselineVec.pain * painScale),
         };
 
   // Anxiety risk: THC band baseline + form add + terp rules + retention rule
@@ -392,4 +436,3 @@ const baselineEngine = {
 };
 
 export default baselineEngine;
-
